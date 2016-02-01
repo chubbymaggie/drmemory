@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -58,107 +58,194 @@ dr_os_version_info_t win_ver = {sizeof(win_ver),};
 #define NTDLL USER32
 
 static const char * const sysnum_names[] = {
-#define USER32(name, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   #name,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+      w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+      w11x86, w11wow, w11x64)   #n,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 #define NUM_SYSNUM_NAMES (sizeof(sysnum_names)/sizeof(sysnum_names[0]))
 
+static const int win10_1511_x64_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w11x64,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int win10_1511_wow_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w11wow,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int win10_1511_x86_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w11x86,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int win10x64_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w10x64,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int win10wow_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w10wow,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int win10x86_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w10x86,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
 static const int win81x64_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w81x64,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w81x64,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win81wow_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w81wow,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w81wow,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win81x86_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w81x86,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w81x86,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win8x64_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w8x64,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w8x64,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win8wow_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w8wow,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w8wow,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win8x86_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w8x86,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w8x86,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int win7x64_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w7x64,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win7wow_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w7wow,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w7wow,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win7x86_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w7x86,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w7x86,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int vistax64_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   vx64,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int vistawow_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   vwow,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   vwow,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int vistax86_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   vx86,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   vx86,
+#include "drsyscall_numx.h"
+#undef USER32
+};
+
+static const int winXPx64_sysnums[] = {
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   xp64,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int winXPwow_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   xpwow,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   xpwow,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win2003_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w2k3,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w2k3,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int winXP_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   xpx86,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   xpx86,
 #include "drsyscall_numx.h"
 #undef USER32
 };
 
 static const int win2K_sysnums[] = {
-#define USER32(n, w2K, xpx86, w2k3, xpwow, vx86, vwow, w7x86, w7wow,\
-     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64)   w2K,
+#define USER32(n, w2K, xpx86, w2k3, xpwow, xp64, vx86, vwow, vx64, w7x86, w7wow, w7x64,\
+     w8x86, w8wow, w8x64, w81x86, w81wow, w81x64, w10x86, w10wow, w10x64,\
+     w11x86, w11wow, w11x64)   w2K,
 #include "drsyscall_numx.h"
 #undef USER32
 };
@@ -515,13 +602,20 @@ drsyscall_os_init(void *drcontext)
     bool wow64 = IF_X64_ELSE(true, dr_is_wow64());
     if (!dr_get_os_version(&win_ver)) {
         ASSERT(false, "unable to get version");
-        /* guess at win7 */
-        win_ver.version = DR_WINDOWS_VERSION_7;
-        win_ver.service_pack_major = 1;
+        /* guess at latest win10 */
+        win_ver.version = DR_WINDOWS_VERSION_10_1511;
+        win_ver.service_pack_major = 0;
         win_ver.service_pack_minor = 0;
-        sysnums = win7wow_sysnums;
     }
     switch (win_ver.version) {
+    case DR_WINDOWS_VERSION_10_1511:
+        sysnums = IF_X64_ELSE(win10_1511_x64_sysnums,
+                              wow64 ? win10_1511_wow_sysnums : win10_1511_x86_sysnums);
+        break;
+    case DR_WINDOWS_VERSION_10:
+        sysnums = IF_X64_ELSE(win10x64_sysnums,
+                              wow64 ? win10wow_sysnums : win10x86_sysnums);
+        break;
     case DR_WINDOWS_VERSION_8_1:
         sysnums = IF_X64_ELSE(win81x64_sysnums,
                               wow64 ? win81wow_sysnums : win81x86_sysnums);
@@ -531,16 +625,20 @@ drsyscall_os_init(void *drcontext)
                               wow64 ? win8wow_sysnums : win8x86_sysnums);
         break;
     case DR_WINDOWS_VERSION_7:
-        sysnums = wow64 ? win7wow_sysnums : win7x86_sysnums;
+        sysnums = IF_X64_ELSE(win7x64_sysnums,
+                              wow64 ? win7wow_sysnums : win7x86_sysnums);
         break;
     case DR_WINDOWS_VERSION_VISTA:
-        sysnums = wow64 ? vistawow_sysnums : vistax86_sysnums;
+        sysnums = IF_X64_ELSE(vistax64_sysnums,
+                              wow64 ? vistawow_sysnums : vistax86_sysnums);
         break;
     case DR_WINDOWS_VERSION_2003:
-        sysnums = wow64 ? winXPwow_sysnums : win2003_sysnums;
+        sysnums = IF_X64_ELSE(winXPx64_sysnums,
+                              wow64 ? winXPwow_sysnums : win2003_sysnums);
         break;
     case DR_WINDOWS_VERSION_XP:
-        sysnums = wow64 ? winXPwow_sysnums : winXP_sysnums;
+        ASSERT(!wow64, "should be 2003 if wow64");
+        sysnums = winXP_sysnums;
         break;
     case DR_WINDOWS_VERSION_2000:
         sysnums = win2K_sysnums;
@@ -824,7 +922,12 @@ os_syscall_succeeded(drsys_sysnum_t sysnum, syscall_info_t *info, cls_syscall_t 
          */
         if (TEST(SYSINFO_RET_MINUS1_FAIL, info->flags))
             return (res != -1);
+        if (info->return_type != DRSYS_TYPE_NTSTATUS) {
+            /* We don't really know, so safest to assume it succeeded */
+            return true;
+        }
     }
+    /* We fell through on NTSTATUS, or we don't know and we guess it's NTSTATUS */
     if (res == STATUS_BUFFER_OVERFLOW) {
         /* Data is filled in so consider success (i#358) */
         return true;
@@ -921,17 +1024,16 @@ handle_context_access(sysarg_iter_info_t *ii,
                       const sysinfo_arg_t *arg_info,
                       app_pc start, uint size)
 {
-#if !defined(_X86_) || defined(X64)
+#if !defined(X86)
     ASSERT_NOT_IMPLEMENTED();
-    return true;
-#else /* defined(_X86_) */
+#endif
     /* The 'cxt' pointer will only be used for retrieving pointers
      * for the CONTEXT fields, hence we can do without safe_read.
      */
     const CONTEXT *cxt = (CONTEXT *)start;
     DWORD context_flags;
-    if (!report_memarg(ii, arg_info, start, sizeof(context_flags),
-                       "CONTEXT.ContextFlags"))
+    if (!report_memarg(ii, arg_info, (app_pc)&cxt->ContextFlags,
+                       sizeof(cxt->ContextFlags), "CONTEXT.ContextFlags"))
         return true;
     if (!safe_read((void*)&cxt->ContextFlags, sizeof(context_flags),
                    &context_flags)) {
@@ -941,34 +1043,11 @@ handle_context_access(sysarg_iter_info_t *ii,
          */
         return true;
     }
-
-    ASSERT(TEST(CONTEXT_i486, context_flags),
-           "ContextFlags doesn't have CONTEXT_i486 bit set");
-
-    /* CONTEXT structure on x86 consists of the following sections:
-     * a) DWORD ContextFlags
-     *
-     * The following fields should be defined if the corresponding
-     * flags are set:
-     * b) DWORD Dr{0...3, 6, 7}        - CONTEXT_DEBUG_REGISTERS,
-     * c) FLOATING_SAVE_AREA FloatSave - CONTEXT_FLOATING_POINT,
-     * d) DWORD Seg{G,F,E,D}s          - CONTEXT_SEGMENTS,
-     * e) DWORD E{di,si,bx,dx,cx,ax}   - CONTEXT_INTEGER,
-     * f) DWORD Ebp, Eip, SegCs, EFlags, Esp, SegSs - CONTEXT_CONTROL,
-     * g) BYTE ExtendedRegisters[...]  - CONTEXT_EXTENDED_REGISTERS.
-     */
-
     if (TESTALL(CONTEXT_DEBUG_REGISTERS, context_flags)) {
 #define CONTEXT_NUM_DEBUG_REGS 6
         if (!report_memarg(ii, arg_info,
                            (app_pc)&cxt->Dr0, CONTEXT_NUM_DEBUG_REGS*sizeof(DWORD),
                            "CONTEXT.DrX"))
-            return true;
-    }
-    if (TESTALL(CONTEXT_FLOATING_POINT, context_flags)) {
-        if (!report_memarg(ii, arg_info,
-                           (app_pc)&cxt->FloatSave, sizeof(cxt->FloatSave),
-                           "CONTEXT.FloatSave"))
             return true;
     }
     /* Segment registers are 16-bits each but stored with 16-bit gaps
@@ -989,12 +1068,79 @@ handle_context_access(sysarg_iter_info_t *ii,
                            (app_pc)&cxt->SegDs, SIZE_SEGMENT_REG, "CONTEXT.SegDs"))
             return true;
     }
+#ifdef X64
+    /* For x64:
+     * CONTEXT_CONTROL         = SegSs, Rsp, SegCs, Rip, and EFlags.
+     * CONTEXT_INTEGER         = Rax, Rcx, Rdx, Rbx, Rbp, Rsi, Rdi, and R8-R15.
+     * CONTEXT_SEGMENTS        = SegDs, SegEs, SegFs, and SegGs.
+     * CONTEXT_FLOATING_POINT  = Xmm0-Xmm15.
+     * CONTEXT_DEBUG_REGISTERS = Dr0-Dr3 and Dr6-Dr7.
+     */
+    if (TESTALL(CONTEXT_CONTROL, context_flags)) {
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->SegSs, SIZE_SEGMENT_REG, "CONTEXT.SegSs"))
+            return true;
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->Rsp, sizeof(cxt->Rsp), "CONTEXT.Rsp"))
+            return true;
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->SegCs, SIZE_SEGMENT_REG, "CONTEXT.SegCs"))
+            return true;
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->Rip, sizeof(cxt->Rip), "CONTEXT.Rip"))
+            return true;
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->EFlags, sizeof(cxt->EFlags), "CONTEXT.Eflags"))
+            return true;
+    }
+    if (TESTALL(CONTEXT_INTEGER, context_flags)) {
+        /* Rax through Rbx */
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->Rax, (byte*)&cxt->Rsp - (byte*)&cxt->Rax,
+                           "CONTEXT.Rax-Rbx"))
+            return true;
+        /* Rbp through R15 */
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->Rbp, (byte*)&cxt->Rip - (byte*)&cxt->Rbp,
+                           "CONTEXT.Rbp-R15"))
+            return true;
+    }
+    if (TESTALL(CONTEXT_FLOATING_POINT, context_flags)) {
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->Xmm0,
+                           (byte*)&cxt->Xmm15+sizeof(cxt->Xmm15)-(byte*)&cxt->Xmm0,
+                           "CONTEXT.XmmX"))
+            return true;
+    }
+#else /* 32-bit X86 */
+    ASSERT(TEST(CONTEXT_i486, context_flags),
+           "ContextFlags doesn't have CONTEXT_i486 bit set");
+
+    /* CONTEXT structure on x86 consists of the following sections:
+     * a) DWORD ContextFlags
+     *
+     * The following fields should be defined if the corresponding
+     * flags are set:
+     * b) DWORD Dr{0...3, 6, 7}        - CONTEXT_DEBUG_REGISTERS,
+     * c) FLOATING_SAVE_AREA FloatSave - CONTEXT_FLOATING_POINT,
+     * d) DWORD Seg{G,F,E,D}s          - CONTEXT_SEGMENTS,
+     * e) DWORD E{di,si,bx,dx,cx,ax}   - CONTEXT_INTEGER,
+     * f) DWORD Ebp, Eip, SegCs, EFlags, Esp, SegSs - CONTEXT_CONTROL,
+     * g) BYTE ExtendedRegisters[...]  - CONTEXT_EXTENDED_REGISTERS.
+     */
+
+    if (TESTALL(CONTEXT_FLOATING_POINT, context_flags)) {
+        if (!report_memarg(ii, arg_info,
+                           (app_pc)&cxt->FloatSave, sizeof(cxt->FloatSave),
+                           "CONTEXT.FloatSave"))
+            return true;
+    }
     if (TESTALL(CONTEXT_INTEGER, context_flags) &&
         ii->arg->sysnum.number != sysnum_CreateThread.number) {
         /* For some reason, cxt->Edi...Eax are not initialized when calling
          * NtCreateThread though CONTEXT_INTEGER flag is set
          */
-#define CONTEXT_NUM_INT_REGS 6
+# define CONTEXT_NUM_INT_REGS 6
         if (!report_memarg(ii, arg_info,
                            (app_pc)&cxt->Edi, CONTEXT_NUM_INT_REGS*sizeof(DWORD),
                            "CONTEXT.Exx"))
@@ -1030,8 +1176,9 @@ handle_context_access(sysarg_iter_info_t *ii,
                            sizeof(cxt->ExtendedRegisters), "CONTEXT.ExtendedRegisters"))
             return true;
     }
+#endif /* X64/X86 */
+    /* XXX: handle AVX state too */
     return true;
-#endif
 }
 
 static bool
@@ -2254,10 +2401,14 @@ handle_AFD_ioctl(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *ii)
     case AFD_SELECT: { /* 9 == 0x12024 */
         AFD_POLL_INFO info;
         uint i;
-        AFD_POLL_INFO *ptr = NULL;
+        AFD_POLL_INFO *ptr = (AFD_POLL_INFO *) inbuf;
         if (ii->arg->pre) {
-            CHECK_DEF(ii, inbuf, offsetof(AFD_POLL_INFO, Handles),
-                      "AFD_POLL_INFO pre-Handles");
+            /* Have to separate the Boolean since padding after it */
+            CHECK_DEF(ii, ptr, sizeof(ptr->Timeout), "AFD_POLL_INFO.Timeout");
+            CHECK_DEF(ii, &ptr->HandleCount, sizeof(ptr->HandleCount),
+                      "AFD_POLL_INFO.HandleCount");
+            CHECK_DEF(ii, &ptr->Exclusive, sizeof(ptr->Exclusive),
+                      "AFD_POLL_INFO.Exclusive");
         }
 
         if (inbuf == NULL || !safe_read(inbuf, sizeof(info), &info) ||
@@ -2267,7 +2418,6 @@ handle_AFD_ioctl(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *ii)
             break;
         }
 
-        ptr = (AFD_POLL_INFO *) inbuf;
         for (i = 0; i < info.HandleCount; i++) {
             /* I'm assuming Status is an output field */
             if (ii->arg->pre ) {
@@ -2548,7 +2698,15 @@ handle_AFD_ioctl(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *ii)
         break;
     }
     case AFD_ACCEPT: { /* 4 == 0x12010 */
-        CHECK_DEF(ii, inbuf, insz, "AFD_ACCEPT_DATA");
+        AFD_ACCEPT_DATA *info = (AFD_ACCEPT_DATA *) inbuf;
+        if (insz != sizeof(AFD_ACCEPT_DATA))
+            WARN("WARNING: invalid size for AFD_ACCEPT_DATA\n");
+        /* Have to separate the Booleans since padding after */
+        CHECK_DEF(ii, inbuf, sizeof(info->UseSAN), "AFD_LISTEN_DATA.UseSAN");
+        CHECK_DEF(ii, &info->SequenceNumber, sizeof(info->SequenceNumber),
+                  "AFD_ACCEPT_DATA.SequenceNumber");
+        CHECK_DEF(ii, &info->ListenHandle, sizeof(info->ListenHandle),
+                  "AFD_ACCEPT_DATA.ListenHandle");
         break;
     }
     default: {

@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2012-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2012-2015 Google, Inc.  All rights reserved.
 # **********************************************************
 
 # Dr. Memory: the memory debugger
@@ -98,7 +98,7 @@ macro(configure_drsyscall_target target)
   set_property(TARGET ${target} PROPERTY COMPILE_DEFINITIONS ${DEFINES_NO_D})
   target_link_libraries(${target} ${ntimp_lib})
   if (NOT USER_SPECIFIED_DynamoRIO_DIR AND "${CMAKE_GENERATOR}" MATCHES "Visual Studio")
-    add_dependencies(${target} ntimp_tgt)
+    add_dependencies(${target} ntdll_imports)
   endif ()
 endmacro(configure_drsyscall_target)
 
@@ -106,10 +106,8 @@ macro(export_drsyscall_target target drmgr)
   # We need to clear the dependents that come from DR to avoid the prefix
   # from affecting them too.
   set_target_properties(${target} PROPERTIES LINK_INTERFACE_LIBRARIES "")
-  # We use a prefix primarily to make it easy to test the imported targets,
-  # and to give a better "bundled extensions" feel.
-  export_target(${target} NAMESPACE drmf_)
-  # Now put in our imports w/o the namespace on them
+  export_target(${target})
+  # Now put in our imports (w/o any namespace)
   set_target_properties(${target} PROPERTIES
     LINK_INTERFACE_LIBRARIES "dynamorio;${drmgr};drcontainers")
   install(TARGETS ${target} EXPORT ${exported_targets_name}
@@ -140,6 +138,7 @@ configure_DynamoRIO_client(drsyscall_static)
 use_DynamoRIO_extension(drsyscall_static drmgr_static)
 use_DynamoRIO_extension(drsyscall_static drcontainers)
 configure_drsyscall_target(drsyscall_static)
+add_static_lib_debug_info(drsyscall_static ${DRMF_INSTALL_BIN})
 export_drsyscall_target(drsyscall_static "drmgr_static")
 
 # We build a separate static target for internal use that has our

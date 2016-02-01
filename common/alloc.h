@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -179,7 +179,7 @@ alloc_exiting_alloc_routine(app_pc pc);
 bool
 alloc_syscall_filter(void *drcontext, int sysnum);
 
-void
+bool
 handle_pre_alloc_syscall(void *drcontext, int sysnum, dr_mcontext_t *mc);
 
 void
@@ -238,7 +238,7 @@ byte *
 set_brk(byte *new_val);
 
 /* this is libc's version */
-extern alloc_size_func_t malloc_usable_size;
+extern alloc_size_func_t libc_malloc_usable_size;
 #endif
 
 /* This can only be called if alloc_ops.global_lock was set */
@@ -255,6 +255,9 @@ alloc_in_create(void *drcontext);
 
 bool
 alloc_in_heap_routine(void *drcontext);
+
+bool
+is_in_realloc_gencode(app_pc pc);
 
 /***************************************************************************
  * ALLOC REPLACEMENT
@@ -280,6 +283,20 @@ alloc_replace_overlaps_any_free(byte *start, byte *end,
 bool
 alloc_replace_overlaps_malloc(byte *start, byte *end,
                               malloc_info_t *info INOUT);
+
+/* Allocate application memory for clients.
+ * This function can only be used with -replace_malloc and
+ * does not work with malloc wrapping mode.
+ */
+byte *
+client_app_malloc(void *drcontext, size_t size, app_pc caller);
+
+/* Free application memory allocated from client_app_malloc.
+ * This function can only be used with -replace_malloc and
+ * does not work with malloc wrapping mode.
+ */
+void
+client_app_free(void *drcontext, void *ptr, app_pc caller);
 
 /***************************************************************************
  * CLIENT CALLBACKS

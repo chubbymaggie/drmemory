@@ -22,7 +22,7 @@
 
 #include "dr_api.h"
 #include "drmemory.h"
-#include "readwrite.h"
+#include "slowpath.h"
 #include "report.h"
 #include "shadow.h"
 #include "syscall.h"
@@ -451,7 +451,8 @@ get_shared_callstack(packed_callstack_t *existing_data, dr_mcontext_t *mc,
 void *
 client_add_malloc_pre(malloc_info_t *mal, dr_mcontext_t *mc, app_pc post_call)
 {
-    if (!options.count_leaks && !options.track_origins_unaddr)
+    if (!options.malloc_callstacks && !options.count_leaks &&
+        !options.track_origins_unaddr)
         return NULL;
     return (void *)
         get_shared_callstack((packed_callstack_t *)mal->client_data, mc, post_call,
@@ -1185,6 +1186,7 @@ client_handle_mremap(app_pc old_base, size_t old_size, app_pc new_base, size_t n
                      bool image)
 {
     bool shrink = (new_size < old_size);
+    bool found;
     if (options.shadowing) {
         shadow_copy_range(old_base, new_base, shrink ? new_size : old_size);
         if (shrink) {
@@ -1195,10 +1197,11 @@ client_handle_mremap(app_pc old_base, size_t old_size, app_pc new_base, size_t n
                              image ? SHADOW_DEFINED : SHADOW_UNDEFINED);
         }
     }
-    IF_DEBUG(bool found =)
-        mmap_tree_remove(old_base, old_size);
-    ASSERT(found, "for now assuming mremap is of anon regions only");
-    mmap_tree_add(new_base, new_size);
+    found = mmap_tree_remove(old_base, old_size);
+    if (found) {
+        /* an anon region */
+        mmap_tree_add(new_base, new_size);
+    }
 }
 #endif
 
@@ -1467,7 +1470,7 @@ client_pre_syscall(void *drcontext, int sysnum)
 #else
     cls_drmem_t *cpt = (cls_drmem_t *) drmgr_get_cls_field(drcontext, cls_idx_drmem);
     if (sysnum == IF_MACOS_ELSE(SYS_sigaction, SYS_rt_sigaction)
-        IF_X86_32(|| sysnum == SYS_sigaction IF_LINUX(|| sysnum == SYS_signal))) {
+        IF_NOT_X64(|| sysnum == SYS_sigaction IF_LINUX(|| sysnum == SYS_signal))) {
         /* PR 406333: linux signal delivery.
          * For delivery: signal event doesn't help us since have to predict
          * which stack and size of frame: should intercept handler registration
@@ -1515,7 +1518,7 @@ client_pre_syscall(void *drcontext, int sysnum)
         }
     }
     else if ((sysnum == IF_MACOS_ELSE(SYS_sigreturn, SYS_rt_sigreturn)
-              IF_X86_32(|| sysnum == SYS_sigreturn)) &&
+              IF_NOT_X64(|| sysnum == SYS_sigreturn)) &&
              options.check_stack_bounds) {
 #ifdef LINUX
         /* PR 406333: linux signal delivery.
@@ -1545,7 +1548,8 @@ client_pre_syscall(void *drcontext, int sysnum)
             sc = (struct sigcontext *) sp;
         }
         if (sc != NULL &&
-            safe_read(&IF_X64_ELSE(sc->rsp, sc->esp), sizeof(new_sp), &new_sp)) {
+            safe_read(&sc->IF_X64_ELSE(rsp, IF_ARM_ELSE(arm_sp, esp)),
+                      sizeof(new_sp), &new_sp)) {
             byte *unaddr_top = NULL;
             if (new_sp > sp && (size_t)(new_sp - sp) < MAX_SIGNAL_FRAME_SIZE) {
                 unaddr_top = new_sp;
@@ -1614,7 +1618,7 @@ client_post_syscall(void *drcontext, int sysnum)
     if (!options.shadowing)
         return;
     if (sysnum == IF_MACOS_ELSE(SYS_sigreturn, SYS_rt_sigaction)
-        IF_X86_32(|| sysnum == SYS_sigaction IF_LINUX(|| sysnum == SYS_signal))) {
+        IF_NOT_X64(|| sysnum == SYS_sigaction IF_LINUX(|| sysnum == SYS_signal))) {
         if (result != 0) {
             LOG(2, "SYS_rt_sigaction/etc. FAILED for handler "PFX"\n",
                   syscall_get_param(drcontext, 1));
@@ -1714,6 +1718,7 @@ instrument_signal_handler(void *drcontext, instrlist_t *bb, instr_t *inst,
  * ADDRESSABILITY
  */
 
+#ifdef X86 /* replacement should avoid needing to port this to ARM */
 static bool
 is_rawmemchr_pattern(void *drcontext, bool write, app_pc pc, app_pc next_pc,
                      app_pc addr, uint sz, instr_t *inst, bool *now_addressable OUT)
@@ -1748,7 +1753,7 @@ is_rawmemchr_pattern(void *drcontext, bool write, app_pc pc, app_pc next_pc,
      * xref PR 485131: propagate partial-unaddr on loads?  but would still
      * complain on the jnb.
      *
-     * FIXME: share code w/ check_undefined_reg_exceptions() in readwrite.c.
+     * FIXME: share code w/ check_undefined_reg_exceptions() in slowpath.c.
      */
     instr_t next;
     app_pc dpc = next_pc;
@@ -1787,6 +1792,7 @@ is_rawmemchr_pattern(void *drcontext, bool write, app_pc pc, app_pc next_pc,
     instr_free(drcontext, &next);
     return match;
 }
+#endif /* X86 */
 
 bool
 is_alloca_pattern(void *drcontext, app_pc pc, app_pc next_pc, instr_t *inst,
@@ -1891,6 +1897,7 @@ is_alloca_pattern(void *drcontext, app_pc pc, app_pc next_pc, instr_t *inst,
      * won't generalize well for other versions of alloca: OTOH we
      * don't want any false negatives.
      */
+#ifdef X86
     instr_t next;
     app_pc dpc = next_pc;
     bool match = false;
@@ -1967,8 +1974,13 @@ is_alloca_pattern(void *drcontext, app_pc pc, app_pc next_pc, instr_t *inst,
     instr_free(drcontext, &next);
 
     return match;
+#elif defined(ARM)
+    /* FIXME i#1726: add ARM patterns */
+    return false;
+#endif
 }
 
+#ifdef X86 /* replacement should avoid needing to port this to ARM */
 static bool
 is_strlen_pattern(void *drcontext, bool write, app_pc pc, app_pc next_pc,
                   app_pc addr, uint sz, instr_t *inst, bool *now_addressable OUT)
@@ -2141,6 +2153,7 @@ is_strcpy_pattern(void *drcontext, bool write, app_pc pc, app_pc next_pc,
     instr_free(drcontext, &next);
     return match;
 }
+#endif /* X86 */
 
 static bool
 is_prefetch(void *drcontext, bool write, app_pc pc, app_pc next_pc,
@@ -2275,6 +2288,7 @@ is_ok_unaddressable_pattern(bool write, app_loc_t *loc, app_pc addr, uint sz,
             add_alloca_exception(drcontext, pc);
         }
     }
+#ifdef X86 /* replacement should avoid needing to port this to ARM */
     if (!match) {
         match = is_strlen_pattern(drcontext, write, pc, dpc, addr, sz,
                                   &inst, &now_addressable);
@@ -2287,6 +2301,7 @@ is_ok_unaddressable_pattern(bool write, app_loc_t *loc, app_pc addr, uint sz,
         match = is_rawmemchr_pattern(drcontext, write, pc, dpc, addr, sz,
                                      &inst, &now_addressable);
     }
+#endif
     if (!match) {
         match = is_prefetch(drcontext, write, pc, dpc, addr, sz,
                             &inst, &now_addressable, loc, mc);
@@ -2341,7 +2356,8 @@ is_loader_exception(app_loc_t *loc, app_pc addr, uint sz)
                          IF_MACOS_ELSE(4, 8)) == 0 ||
                  /* i#1703: dyld also accesses DR through these two libs */
                  IF_MACOS(strcmp(modname, "libmacho.dylib") == 0 ||
-                          strcmp(modname, "libobjc.A.dylib") == 0 ||)
+                          strcmp(modname, "libobjc.A.dylib") == 0 ||
+                          strcmp(modname, "libdyld.dylib") == 0 ||)
                  is_in_client_or_DR_lib(pc))) {
                 /* If this happens too many times we may want to go back to
                  * marking our libs as defined and give up on catching wild

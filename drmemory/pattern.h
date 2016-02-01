@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2013 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2016 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /* Dr. Memory: the memory debugger
@@ -29,7 +29,7 @@
 /* default pattern value if user does not specify any. */
 /* NOTE: the selection of pattern value may affect performance greatly.
  * A popular value used by a program (e.g. 0, ASCII) should not be used as
- * pattern value, as it may trigger a lot of illegal instruction exceptions
+ * a pattern value, as it may trigger a lot of illegal instruction exceptions
  * and expensive lookups.
  */
 #define DEFAULT_PATTERN 0xf1fd
@@ -41,12 +41,15 @@ pattern_instrument_check(void *drcontext, instrlist_t *ilist, instr_t *app,
 void
 pattern_instrument_reverse_scan(void *drcontext, instrlist_t *ilist);
 
+#ifdef X86
 void
 pattern_instrument_repstr(void *drcontext, instrlist_t *ilist,
                           bb_info_t *bi, bool translating);
+#endif
 
 bool
-pattern_handle_segv_fault(void *drcontext, dr_mcontext_t *raw_mc
+pattern_handle_segv_fault(void *drcontext, dr_mcontext_t *raw_mc,
+                          dr_mcontext_t *mc
                           _IF_WINDOWS(app_pc target)
                           _IF_WINDOWS(bool guard));
 

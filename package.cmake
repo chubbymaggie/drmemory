@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 
@@ -26,7 +26,7 @@
 #
 # Invoke like this: "ctest -S package.cmake,dr=<path-to-DynamoRIO>\;build=<build#>"
 
-cmake_minimum_required (VERSION 2.2)
+cmake_minimum_required (VERSION 2.6)
 
 # set from an including package script
 if (NOT DEFINED arg_sub_package)
@@ -48,12 +48,6 @@ set(arg_preload "")    # cmake file to include prior to each 32-bit build
 set(arg_preload64 "")  # cmake file to include prior to each 64-bit build
 set(arg_use_nmake OFF) # use nmake even if gnu make is present
 set(arg_cpackappend "")# string to append to CPackConfig.cmake before packaging
-set(arg_32_only OFF)   # do not include 64-bit
-
-if (APPLE)
-  # DRi#58: core DR does not yet support 64-bit Mac
-  set(arg_32_only ON)
-endif ()
 
 foreach (arg ${CTEST_SCRIPT_ARG})
   if (${arg} MATCHES "^build=")
@@ -90,9 +84,6 @@ foreach (arg ${CTEST_SCRIPT_ARG})
       ${arg} MATCHES "^drmemory_only")
     set(arg_drmem_only ON)
   endif ()
-  if (${arg} MATCHES "^32_only")
-    set(arg_32_only ON)
-  endif ()
 endforeach (arg)
 
 if ("${arg_build}" STREQUAL "")
@@ -123,6 +114,11 @@ else ()
   set(run_tests OFF)
   set(CTEST_SOURCE_DIRECTORY "${CTEST_SCRIPT_DIRECTORY}")
   include("${runsuite_include_path}/runsuite_common_pre.cmake")
+endif ()
+
+if (APPLE)
+  # DRi#58: core DR does not yet support 64-bit Mac
+  set(arg_32_only ON)
 endif ()
 
 # i#1099: be sure to set BUILDING_PACKAGE

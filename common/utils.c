@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -115,7 +115,7 @@ wait_for_user(const char *message)
         char keypress;
         dr_fprintf(STDERR, "%s in pid "PIDFMT"\n", message, dr_get_process_id());
         dr_fprintf(STDERR, "<press enter to continue>\n");
-        dr_read_file(IF_MACOS_ELSE(stdin->_file, stdin->_fileno),
+        dr_read_file(stdin->IF_MACOS_ELSE(_file, IF_ANDROID_ELSE(_file, _fileno)),
                      &keypress, sizeof(keypress));
     }
 #endif
@@ -249,7 +249,9 @@ lookup_symbol_common(const module_data_t *mod, const char *sym_pattern,
     drsym_error_t symres;
     char *fname = NULL, *c, *fend;
 
-    if (mod->full_path == NULL || mod->full_path[0] == '\0')
+    if (mod->full_path == NULL || mod->full_path[0] == '\0'
+        /* i#1803: handle special cases like "[vdso]" */
+        IF_LINUX(|| mod->full_path[0] == '['))
         return NULL;
     if (callback == NULL) {
         if (op_use_symcache) {
@@ -415,10 +417,21 @@ module_has_debug_info(const module_data_t *mod)
 void
 print_mcontext(file_t f, dr_mcontext_t *mc)
 {
+# ifdef X86
     dr_fprintf(f, "\txax="PFX", xbx="PFX", xcx="PFX", xdx="PFX"\n"
                "\txsi="PFX", xdi="PFX", xbp="PFX", xsp="PFX"\n",
                mc->xax, mc->xbx, mc->xcx, mc->xdx,
                mc->xsi, mc->xdi, mc->xbp, mc->xsp);
+# elif defined(ARM)
+    dr_fprintf(f, "\tr0="PFX", r1="PFX", r2="PFX", r3="PFX"\n"
+               "\tr4="PFX", r5="PFX", r6="PFX", r7="PFX"\n",
+               "\tr8="PFX", r9="PFX", r10="PFX", r11="PFX"\n",
+               "\tr12="PFX", sp="PFX", lr="PFX", pc="PFX"\n",
+               mc->r0, mc->r1, mc->r2, mc->r3,
+               mc->r4, mc->r5, mc->r6, mc->r7,
+               mc->r8, mc->r9, mc->r10, mc->r11,
+               mc->r12, mc->sp, mc->lr, mc->pc);
+# endif
 }
 #endif
 
@@ -572,6 +585,11 @@ text_matches_pattern(const char *text, const char *pattern,
         cmp_cur = *cur_text;
         cmp_pat = *pattern;
         if (ignore_case) {
+            /* XXX DRi#943: toupper is better, for int18n, and we need to call
+             * islower() first to be safe for all tolower() implementations.
+             * Even better would be switching to our own locale-independent case
+             * folding.
+             */
             cmp_cur = (char) tolower(cmp_cur);
             cmp_pat = (char) tolower(cmp_pat);
         }
@@ -617,23 +635,6 @@ text_matches_any_pattern(const char *text, const char *patterns, bool ignore_cas
         c += strlen(c) + 1;
     }
     return false;
-}
-
-char *
-strnchr(const char *str, int find, size_t max)
-{
-    register const char *s = str;
-    register char c = (char) find;
-    while (true) {
-        if (s - str >= max)
-            return NULL;
-        if (*s == c)
-            return (char *) s;
-        if (*s == '\0')
-            return NULL;
-        s++;
-    }
-    return NULL;
 }
 
 /* patterns is a null-separated, double-null-terminated list of strings */
@@ -897,7 +898,7 @@ init_os_version(void)
     if (!dr_get_os_version(&os_version)) {
         ASSERT(false, "unable to get Windows version");
         /* assume latest just to make progress: good chance of working */
-        os_version.version = DR_WINDOWS_VERSION_7;
+        os_version.version = DR_WINDOWS_VERSION_10_1511;
         os_version.service_pack_major = 1;
         os_version.service_pack_minor = 0;
     }
@@ -1141,6 +1142,7 @@ nonheap_free(void *p, size_t size, heapstat_t type)
  * REGISTER CONVERSION UTILITIES
  */
 
+#ifdef X86
 static reg_id_t
 reg_32_to_8h(reg_id_t reg)
 {
@@ -1148,6 +1150,7 @@ reg_32_to_8h(reg_id_t reg)
            "reg_32_to_8h: passed non-32-bit a-d reg");
     return (reg - REG_EAX) + REG_AH;
 }
+#endif
 
 reg_id_t
 reg_ptrsz_to_16(reg_id_t reg)
@@ -1177,16 +1180,18 @@ reg_ptrsz_to_8(reg_id_t reg)
     return reg_32_to_8(reg);
 }
 
+#ifdef X86
 reg_id_t
 reg_ptrsz_to_8h(reg_id_t reg)
 {
     ASSERT(reg >= DR_REG_XAX && reg <= DR_REG_XBX,
            "wrong register for conversion");
-#ifdef X64
+# ifdef X64
     reg = reg_64_to_32(reg);
-#endif
+# endif
     return reg_32_to_8h(reg);
 }
+#endif
 
 reg_id_t
 reg_to_size(reg_id_t reg, opnd_size_t size)

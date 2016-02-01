@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -36,7 +36,9 @@
 # include <asm-i386/stat.h>
 #else
 # include <asm/stat.h>
-# include <sys/ustat.h>
+# ifndef ANDROID
+#  include <sys/ustat.h>
+# endif
 # include <sys/statfs.h>
 #endif
 #include <utime.h> /* struct utimbuf */
@@ -48,14 +50,18 @@
 #include <linux/utsname.h> /* struct new_utsname */
 #include <sched.h> /* struct sched_param */
 
+#ifndef ANDROID
 /* Avoid conflicts w/ DR's REG_* enum w/ more recent distros
  * by directly getting siginfo_t instead of including "<signal.h>".
  * Xref DRi#34.  We could instead update to use DR_REG_* and unset
  * DynamoRIO_REG_COMPATIBILITY.
  */
-#define __need_siginfo_t
-#define __need_sigevent_t
-#include <bits/siginfo.h>
+# define __need_siginfo_t
+# define __need_sigevent_t
+# include <bits/siginfo.h>
+#else
+# include <signal.h>
+#endif
 
 #include <linux/capability.h> /* cap_user_header_t */
 /* capability.h conflicts with and is superset of these:
@@ -72,7 +78,9 @@
 #define _BITS_STAT_H	1
 #include <fcntl.h> /* F_GETFD, etc. */
 
-#include <asm/ldt.h> /* struct user_desc */
+#ifdef X86
+# include <asm/ldt.h> /* struct user_desc */
+#endif
 #include <linux/futex.h>
 #include <linux/mman.h> /* MREMAP_FIXED */
 
@@ -143,7 +151,7 @@
 #include <linux/mroute.h>
 #ifdef GLIBC_2_3_2
 # include <linux/mtio.h>
-#else
+#elif !defined(ANDROID)
 # include <sys/mtio.h>
 #endif
 #include <linux/netrom.h>

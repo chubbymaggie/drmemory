@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -60,10 +60,43 @@ The Dr. Memory distribution contains the following:
 \section sec_changes Changes Since Prior Releases
 
 The current version is \TOOL_VERSION.
-The changes between \TOOL_VERSION and version 1.8.0 include:
- - Added support for Mac OSX Yosemite.
+The changes between \TOOL_VERSION and version 1.9.0 include:
+ - Added preliminary 64-bit Dr. Memory support for Windows and Linux (but
+   not MacOS yet).  This does not yet include uninitialized read checking,
+   so we still recommend compiling your application as 32-bit.
+ - Fixed incremental error output to the console for graphical
+   applications, which was missing in prior versions when using certain
+   consoles such as cmd.
+ - Removed the -fuzz_mutator option and replaced it with separate options
+   for each component of the mutator.
+ - Added custom mutator support to Dr. Fuzz.
+ - Changed the mutator option passing scheme for Dr. Fuzz to take in
+   an argv-style array of parameters, to better support custom mutators.
+ - Added checking that the program counter points to valid memory,
+   controlled by the on-by-default -check_pc option.
+ - Added a new option -malloc_callstacks for recording malloc callstacks
+   to include in alloc/free error reports when leaks are disabled.
+   The option is off by default due to the additional overhead that
+   it incurs.
+ - Added code coverage measurement via a new option -coverage.
+ - By default, without the \p -show_reachable option, reachable leak
+   callstacks are no longer compared to suppressions, in order to reduce
+   overhead.
 
-The changes between \TOOL_VERSION and version 1.7.0 include:
+The changes between version 1.9.0 and version 1.8.0 include:
+ - Added support for Mac OSX Yosemite.
+ - Added Dr. Fuzz, a fuzz testing framework that facilitates repeated
+   execution of any program function while mutating the arguments.
+ - Added a fuzz testing mode to Dr. Memory. Use new options -fuzz_target
+   and -fuzz_mutator to fuzz test any C or C++ target function having a
+   buffer argument and a corresponding buffer size argument.
+ - Switched the Windows installer from an NSIS-based executable to
+   a WIX-based .msi file.  The new installer automatically adds
+   Dr. Memory to the PATH for the current user.
+ - Added an unaddressable warning report on a write to read-only memory.
+ - Added support for the VALGRIND_DO_LEAK_CHECK annotation.
+
+The changes between version 1.8.0 and version 1.7.0 include:
  - Dropped official support for Windows 2000.
  - Enabled -delay_frees_stack by default.
  - The Windows installer now automatically adds Dr. Memory as an External
@@ -99,14 +132,14 @@ The changes between version 1.7.0 and version 1.6.1 include:
    which provides persistent caching of symbol lookup data to reduce
    startup time overhead on large applications.
  - Clarified the final parameter to umbra_get_shadow_memory_type() and
-   umbra_shadow_memory_is_shared() to be #umbra_shadow_memory_type_t
+   umbra_shadow_memory_is_shared() to be umbra_shadow_memory_type_t
    rather than uint.
  - Clarified the 2nd parameter to umbra_create_shadow_memory() to be
-   #umbra_shadow_memory_flags_t rather than uint.
- - Clarified the #umbra_shadow_memory_info_t shadow_type field to be
-   #umbra_shadow_memory_type_t rather than uint.
- - Clarified the #umbra_map_options_t flags field to be
-   #umbra_map_flags_t rather than uint.
+   umbra_shadow_memory_flags_t rather than uint.
+ - Clarified the umbra_shadow_memory_info_t shadow_type field to be
+   umbra_shadow_memory_type_t rather than uint.
+ - Clarified the umbra_map_options_t flags field to be
+   umbra_map_flags_t rather than uint.
  - Added static library versions of drsyscall and umbra.
  - On Windows, handle leak detection (-check_handle_leaks) is now on by default
    in full mode.  However, it is still experimental and conservative,
@@ -358,7 +391,8 @@ some bugs.  The missing features include:
    the Windows API malloc which can lead to false negatives.
  - Definedness is tracked at the byte level, not at the bit level,
    which when bitfields are in use can lead to false positives.
- - 64-bit support: we plan to add this in the future.
+ - 64-bit uninitialized read support: we plan to add this in the future.
+   All other error types are detected in 64-bit applications.
  - 32-bit applications on 64-bit Windows have some limitations (these are
    actually limitations of the current version of the underlying DynamoRIO
    engine): if the app creates threads prior to image entry (as Cygwin apps

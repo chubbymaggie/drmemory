@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -30,17 +30,20 @@
 #endif
 #include "drmemory.h"
 #include "shadow.h"
-#include "readwrite.h"
+#include "slowpath.h"
 #include "syscall.h"
 #include "alloc.h"
 #include "report.h"
 #include "callstack.h"
 #include "heap.h"
 #include "alloc_drmem.h"
+#include "fuzzer.h"
 #ifdef UNIX
 # include <errno.h>
 #endif
 #include <limits.h>
+
+#define FUZZER_MSG_SZ 0x100
 
 static uint error_id; /* errors + leaks */
 static uint error_id_potential; /* potential errors + leaks */
@@ -185,7 +188,7 @@ typedef struct _error_toprint_t {
     size_t sz;                  /* Access size or alloc size. */
 
     /* For unaddrs: */
-    bool write;                 /* Access was a write. */
+    uint access_type;           /* DR_MEMPROT_* flag describing the access. */
 
     /* For unaddrs, uninits, and warnings: */
     bool report_instruction;    /* Whether to report instr. */
@@ -215,6 +218,9 @@ typedef struct _error_toprint_t {
      */
     const char *aux_msg;
     packed_callstack_t *aux_pcs;
+
+    /* For the state of any threads executing a fuzz target: */
+    const char *fuzzer_msg;
 
     /* For leaks: */
     size_t indirect_size;       /* Size of indirect allocs. */
@@ -523,6 +529,7 @@ is_module_wildcard(suppress_spec_t *spec)
     return (spec->num_frames == 1 &&
             spec->instruction == NULL &&
             spec->frames[0].is_module &&
+            spec->frames[0].func != NULL &&
             spec->frames[0].func[0] == '*' &&
             spec->frames[0].func[1] == '\0');
 }
@@ -800,9 +807,9 @@ suppress_spec_add_frame(suppress_spec_t *spec, const char *cstack_start,
 static void
 read_suppression_file(file_t f, bool is_default)
 {
-    char *line, *newline, *next_line, *eof;
+    const char *line, *newline, *next_line, *eof;
     suppress_spec_t *spec = NULL;
-    char *cstack_start;
+    const char *cstack_start;
     int type;
     bool skip_suppression = false;
     int brace_line = -1;
@@ -829,26 +836,10 @@ read_suppression_file(file_t f, bool is_default)
     cstack_start = (char *) map;
     eof = ((char *) map) + map_size;
     for (line = (char *) map; line < eof; line = next_line) {
-        /* First, set "line" to start of line and "newline" to end (pre-whitespace) */
-        /* We have to use strnchr to avoid SIGBUS on non-Windows */
-        newline = strnchr(line, '\r', eof - line);
-        if (newline == NULL)
-            newline = strnchr(line, '\n', eof - line);
-        if (newline == NULL) {
-            newline = ((char *)map) + map_size; /* handle EOF w/o trailing \n */
-            next_line = newline + 1;
-        } else {
-            for (next_line = newline; *next_line == '\r' || *next_line == '\n';
-                 next_line++)
-                ; /* nothing */
-            /* trim trailing whitespace (i#381) */
-            for (; newline > line && (*(newline-1) == ' ' || *(newline-1) == '\t');
-                 newline--)
-                ; /* nothing */
-        }
-        /* Skip leading whitespace (mainly to support Valgrind format) */
-        for (; line < newline && (*line == ' ' || *line == '\t'); line++)
-            ; /* nothing */
+        /* We trim trailing whitespace (i#381) and skip leading whitespace (mainly to
+         * support Valgrind format)
+         */
+        next_line = find_next_line(line, eof, &line, &newline, true);
         /* Skip blank and comment lines */
         if (line == newline || line[0] == '#')
             continue;
@@ -2163,7 +2154,7 @@ record_error(uint type, packed_callstack_t *pcs, app_loc_t *loc, dr_mcontext_t *
 {
     stored_error_t *err = stored_error_create(type);
     if (pcs == NULL) {
-        reg_t save_xbp = mc->xbp;
+        reg_t save_xbp = MC_FP_REG(mc);
         bool zeroed_xbp = false;
         const char *modpath = NULL;
         uint max_frames = (type_is_leak(type) ? options.malloc_max_frames :
@@ -2208,18 +2199,18 @@ record_error(uint type, packed_callstack_t *pcs, app_loc_t *loc, dr_mcontext_t *
                     if (modpath != NULL && !text_matches_pattern
                         (modpath, "*windows?sys*", true/*ignore case*/)) {
                         zeroed_xbp = true;
-                        mc->xbp = 0;
+                        MC_FP_REG(mc) = 0;
                     }
                 }
             } else {
                 /* we have definedness info so scanning is accurate */
                 zeroed_xbp = true;
-                mc->xbp = 0;
+                MC_FP_REG(mc) = 0;
             }
         }
         packed_callstack_record(&err->pcs, mc, loc, max_frames);
         if (zeroed_xbp) {
-            mc->xbp = save_xbp;
+            MC_FP_REG(mc) = save_xbp;
             /* i#1049: scan may not have been far enough so re-try w/ ebp */
             if (packed_callstack_num_frames(err->pcs) <= 1) {
                 IF_DEBUG(uint ref = )
@@ -2431,15 +2422,28 @@ gather_heap_info(INOUT error_toprint_t *etp, app_pc addr, size_t sz)
     ASSERT(!found || addr+sz >= start - options.redzone_size,
            "bug in delay free overlap calc");
     if (found) {
-        etp->free_start = start;
-        etp->free_size = end - start;
+        /* For the Note labels, we do want to mention overlap with freed redzones,
+         * but we try to avoid overlap with memalign pre-padding (i#94).
+         */
+        if (!options.delay_frees_stack || etp->free_pcs != NULL) {
+            etp->free_start = start;
+            etp->free_size = end - start;
+        }
         /* Don't label an access to a freed redzone as a use-after-free, as
          * it can easily be an underflow from an adjacent live malloc.
          * We'll still list it as "N bytes beyond memory that was freed".
          * We do want to include access to freed padding.
+         *
+         * Also don't label a free list entry without a callstack as a
+         * use-after-free, as it could be an artificial free from something
+         * like the pre-alloc padding for memalign (i#94).
+         * If !options.delay_frees_stack we label it anyway: better to properly
+         * label real use-after-free and have bad labeling for rare memalign
+         * underflow.
          */
         if (addr < (byte *) ALIGN_FORWARD(end, MALLOC_CHUNK_ALIGNMENT) &&
-            addr+sz >= etp->free_start)
+            addr+sz >= etp->free_start &&
+            (!options.delay_frees_stack || etp->free_pcs != NULL))
             etp->use_after_free = true;
     }
 }
@@ -2706,6 +2710,7 @@ static void
 report_error(error_toprint_t *etp, dr_mcontext_t *mc, packed_callstack_t *pcs)
 {
     void *drcontext = dr_get_current_drcontext();
+    char fuzzer_buf[FUZZER_MSG_SZ];
     stored_error_t *err;
     bool reporting = false;
     suppress_spec_t *spec;
@@ -2865,6 +2870,11 @@ report_error(error_toprint_t *etp, dr_mcontext_t *mc, packed_callstack_t *pcs)
     }
     dr_mutex_unlock(error_lock);
 
+    if (fuzzer_error_report(drcontext, fuzzer_buf, FUZZER_MSG_SZ, err->id) > 0)
+        etp->fuzzer_msg = fuzzer_buf;
+    else
+        etp->fuzzer_msg = NULL;
+
     errbuf = report_alloc_buf(drcontext, &errbufsz);
     print_error_report(drcontext, errbuf, errbufsz, reporting, etp, err, &ecs);
     report_free_buf(drcontext, errbuf, errbufsz);
@@ -2940,7 +2950,8 @@ print_error_to_buffer(char *buf, size_t bufsz, error_toprint_t *etp,
             subtitle = " beyond heap bounds";
         BUFPRINT(buf, bufsz, sofar, len,
                  "UNADDRESSABLE ACCESS%s: %s", subtitle,
-                 etp->write ? "writing " : "reading ");
+                 etp->access_type == DR_MEMPROT_WRITE ? "writing " :
+                 (etp->access_type == DR_MEMPROT_EXEC ? "executing " : "reading "));
         if (!options.brief)
             BUFPRINT(buf, bufsz, sofar, len, PFX"-"PFX" ", addr, addr_end);
         BUFPRINT(buf, bufsz, sofar, len, "%d byte(s)", etp->sz);
@@ -3046,10 +3057,10 @@ print_error_to_buffer(char *buf, size_t bufsz, error_toprint_t *etp,
         report_heap_info(etp, buf, bufsz, &sofar, addr, etp->sz,
                          etp->errtype == ERROR_INVALID_HEAP_ARG, for_log);
     }
+    if (etp->aux_msg != NULL)
+        BUFPRINT(buf, bufsz, sofar, len, "%s", etp->aux_msg);
     if (etp->aux_pcs != NULL) {
         symbolized_callstack_t scs;
-        if (etp->aux_msg != NULL)
-            BUFPRINT(buf, bufsz, sofar, len, "%s", etp->aux_msg);
         /* to get var-align we need to convert to symbolized.
          * if we remove var-align feature, should use direct packed_callstack_print
          * and avoid this extra work
@@ -3064,6 +3075,9 @@ print_error_to_buffer(char *buf, size_t bufsz, error_toprint_t *etp,
                  INFO_PFX, ecs->instruction);
     }
 
+    if (etp->fuzzer_msg != NULL)
+        BUFPRINT(buf, bufsz, sofar, len, etp->fuzzer_msg);
+
     if (!for_log && !options.check_leaks && type_is_leak(etp->errtype)) {
         BUFPRINT(buf, bufsz, sofar, len,
                  "   (run with -check_leaks to obtain a callstack)"NL);
@@ -3075,7 +3089,21 @@ print_error_to_buffer(char *buf, size_t bufsz, error_toprint_t *etp,
 
 #define UNADDR_MSG_SZ 0x100
 void
-report_unaddressable_access(app_loc_t *loc, app_pc addr, size_t sz, bool write,
+report_unaddr_warning(app_loc_t *loc, dr_mcontext_t *mc, const char *msg,
+                      app_pc addr, size_t sz, bool report_instruction)
+{
+    char buf[UNADDR_MSG_SZ];
+    ssize_t len = 0;
+    size_t sofar = 0;
+    ASSERT(strlen(msg) < (UNADDR_MSG_SZ/2), "msg is too large");
+    BUFPRINT(buf, UNADDR_MSG_SZ, sofar, len, "%s "PFX"-"PFX,
+             msg, addr, addr + sz, sz);
+    report_warning(loc, mc, buf, addr, sz, report_instruction);
+}
+
+void
+report_unaddressable_access(app_loc_t *loc, app_pc addr, size_t sz,
+                            uint access_type, /* DR_MEMPROT_ flag */
                             app_pc container_start, app_pc container_end,
                             dr_mcontext_t *mc)
 {
@@ -3086,7 +3114,7 @@ report_unaddressable_access(app_loc_t *loc, app_pc addr, size_t sz, bool write,
     etp.loc = loc;
     etp.addr = addr;
     etp.sz = sz;
-    etp.write = write;
+    etp.access_type = access_type;
     etp.container_start = container_start;
     etp.container_end = container_end;
     etp.report_instruction = true;
@@ -3160,18 +3188,22 @@ report_mismatched_heap(app_loc_t *loc, app_pc addr, dr_mcontext_t *mc,
 {
     error_toprint_t etp = {0};
     char buf[MISMATCH_MSG_SZ];
+    ssize_t len = 0;
+    size_t sofar = 0;
     etp.errtype = ERROR_INVALID_HEAP_ARG;
     etp.loc = loc;
     etp.addr = addr;
     etp.msg = msg;
     etp.aux_pcs = pcs;
     if (etp.aux_pcs != NULL) {
-        ssize_t len = 0;
-        size_t sofar = 0;
         BUFPRINT(buf, BUFFER_SIZE_ELEMENTS(buf), sofar, len,
                  "%smemory was allocated here:"NL, INFO_PFX);
-        etp.aux_msg = buf;
+    } else {
+        BUFPRINT(buf, BUFFER_SIZE_ELEMENTS(buf), sofar, len,
+                 "%sre-run with -malloc_callstacks (or -count_leaks) to add the "
+                 "allocation callstack."NL, INFO_PFX);
     }
+    etp.aux_msg = buf;
     report_error(&etp, mc, NULL);
 }
 
@@ -3410,8 +3442,12 @@ report_leak(bool known_malloc, app_pc addr, size_t size, size_t indirect_size,
 
         /* Convert to symbolized so we can compare to suppressions.  Don't try
          * to get stacks for early leaks, leave ecs.scs with 0 frames.
+         *
+         * i#1852: to improve speed we don't symbolize reachable (and thus don't
+         * support suppressing) when show_reachable is off and the only goal
+         * is a count of unique instances.
          */
-        if (!early) {
+        if (!early && (!reachable || show_reachable)) {
             ASSERT(pcs != NULL, "non-early allocs must have stacks");
             packed_callstack_to_symbolized(pcs, &ecs.scs);
         }
@@ -3420,8 +3456,12 @@ report_leak(bool known_malloc, app_pc addr, size_t size, size_t indirect_size,
             alloc_callstack_unlock();
 
         /* only real, possible, and reachable leaks can be suppressed */
-        if (type < ERROR_MAX_VAL)
-            reporting = !on_suppression_list(type, &ecs, &spec);
+        if (type < ERROR_MAX_VAL) {
+            if (reachable && !show_reachable)
+                reporting = true; /* suppressions not supported: i#1852 */
+            else
+                reporting = !on_suppression_list(type, &ecs, &spec);
+        }
 
         if (reporting && type < ERROR_MAX_VAL) {
             /* We can have identical leaks across nudges: keep same error #.
@@ -3575,7 +3615,7 @@ report_heap_region(bool add, app_pc start, app_pc end, dr_mcontext_t *mc)
 void
 report_callstack(void *drcontext, dr_mcontext_t *mc)
 {
-    print_callstack_to_file(drcontext, mc, mc->xip, INVALID_FILE/*use pt->f*/,
+    print_callstack_to_file(drcontext, mc, mc->pc, INVALID_FILE/*use pt->f*/,
                             options.callstack_max_frames);
 }
 #endif /* DEBUG */

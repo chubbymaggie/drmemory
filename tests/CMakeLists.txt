@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 
@@ -20,6 +20,13 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 cmake_minimum_required(VERSION 2.6)
+
+include(${PROJECT_SOURCE_DIR}/make/policies.cmake NO_POLICY_SCOPE)
+
+# Passing long to runsuite auto-enables release build tests.
+# It also sets this option, which we can use for test configurations
+# that we do not want to fill pre-commit time with.
+option(TEST_LONG "run long set of tests")
 
 # Restore global flags after all configure_DynamoRIO_client() calls.
 foreach (config "" ${CMAKE_BUILD_TYPE} ${CMAKE_CONFIGURATION_TYPES})
@@ -94,6 +101,13 @@ function(set_props target)
   if (VMKERNEL)
     set(defs ${defs} VMX86_SERVER)
   endif (VMKERNEL)
+  # DrMem itself gets ARM from dr_api.h but tests need it on their own:
+  if (ARM)
+    set(defs ${defs} ARM)
+  endif ()
+  if (X86)
+    set(defs ${defs} X86)
+  endif ()
   set_property(TARGET ${target} PROPERTY COMPILE_DEFINITIONS
     ${defs} ${DEFINES_NO_D} ${DR_DEFINES_NO_D})
   # enough tests need this (malloc, free, registers, cs2bug, float, etc.)
@@ -120,11 +134,6 @@ function(tobuild name source)
   set_props(${name})
 
   if ("${srccode}" MATCHES "ifndef ASM_CODE_ONLY")
-    if (WIN32)
-      # DRi#893: asm code is producing safeseh compilation failures w/ VS2012.
-      # I believe I have the proper prologue+epilogue but I still the error, so:
-      append_property_string(TARGET ${name} LINK_FLAGS "/safeseh:no")
-    endif ()
     if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
       add_dependencies(${name} ${gen_asm_tgt})
     endif ()
@@ -160,20 +169,18 @@ if (WIN32)
   target_link_libraries(run_in_bg_tgt ${ntimp_lib})
   if (NOT USER_SPECIFIED_DynamoRIO_DIR AND "${CMAKE_GENERATOR}" MATCHES "Visual Studio")
     # for parallel build correctness we need a target dependence
-    add_dependencies(run_in_bg_tgt ntimp_tgt)
+    add_dependencies(run_in_bg_tgt ntdll_imports)
   endif ()
 endif (WIN32)
 
-# For more portable testing (PR 544430):
-# 1) use relative dirs within parent build dir
 if (X64)
   set(BIN_ARCH "bin64")
 else ()
   set(BIN_ARCH "bin")
 endif ()
-file(RELATIVE_PATH bin_relative "${CMAKE_CURRENT_BINARY_DIR}"
-  "${PROJECT_BINARY_DIR}/${BUILD_BIN_PREFIX}/${BIN_ARCH}")
-# 2) parameterize dirs outside of build dir
+# FIXME PR 544430: use relative dirs within parent build dir for more portable testing
+set(bin_path "${PROJECT_BINARY_DIR}/${BUILD_BIN_PREFIX}/${BIN_ARCH}")
+# parameterize dirs outside of build dir
 set(src_param_pattern "{DRMEMORY_CTEST_SRC_DIR}")
 set(DR_param_pattern "{DRMEMORY_CTEST_DR_DIR}")
 
@@ -188,9 +195,9 @@ function (get_relative_location target outvar)
 endfunction (get_relative_location)
 
 if (UNIX)
-  set(cmd_shell ${bin_relative}/${toolname})
+  set(cmd_shell ${bin_path}/${toolname})
 else (UNIX)
-  set(cmd_shell ${bin_relative}/${toolname}.exe)
+  set(cmd_shell ${bin_path}/${toolname}.exe)
 
   # XXX i#143: we now support /MDd but need symbols for full support.
   # Also, /MTd results in the debug heap code throwing an exception
@@ -252,7 +259,7 @@ endif (TOOL_DR_MEMORY)
 # copy to build dir
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/runtest.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/runtest.cmake" COPYONLY)
-set(cmd_script -P "./runtest.cmake")
+set(cmd_script -P "${PROJECT_BINARY_DIR}/tests/runtest.cmake")
 
 # test_ops and drmem_ops should have words separated by ; so they'll
 # be separate arguments on the cmdline, while dr_ops should be
@@ -414,18 +421,27 @@ if (NOT X64)
 newtest(hello hello.c)
 newtest(malloc malloc.c)
 newtest(free free.c)
-newtest(registers registers.c)
-newtest(asmtest asmtest.c)
+if (ARM)
+  newtest_ex(free_arm free.c "" "" "" OFF "free" 0)
+  append_test_compile_flags(free_arm "-marm")
+endif (ARM)
+newtest(badjmp badjmp.c)
+if (NOT ARM) # XXX i#1726: port to ARM
+  newtest(registers registers.c)
+  newtest(asmtest asmtest.c)
+endif ()
 if (TOOL_DR_MEMORY)
   # Doesn't make sense for DrHeapstat
   newtest(multierror multierror.cpp)
 endif (TOOL_DR_MEMORY)
-newtest_custbuild(bitfield bitfield.cpp "-DBITFIELD_ASM" bitfield)
-if (WIN32)
-  # i#489: building /GL results in a double-xor sequence
-  set(bitfieldGL_disable_asm ON)
-  newtest_custbuild(bitfieldGL bitfield.cpp "/O2 /GL" bitfield)
-endif (WIN32)
+if (NOT ARM) # XXX i#1726: port to ARM
+  newtest_custbuild(bitfield bitfield.cpp "-DBITFIELD_ASM" bitfield)
+  if (WIN32)
+    # i#489: building /GL results in a double-xor sequence
+    set(bitfieldGL_disable_asm ON)
+    newtest_custbuild(bitfieldGL bitfield.cpp "/O2 /GL" bitfield)
+  endif (WIN32)
+endif ()
 
 if (UNIX OR "${CMAKE_SYSTEM_VERSION}" STRLESS "6.2")
   set(cs2bug_res "cs2bug")
@@ -508,7 +524,10 @@ if (UNIX)
   # i#1264: the name "pthreads" on an executable breaks 2.8.11 find_package(Threads)
   # so we use "pthread_test".  The compare files are still "pthreads.*".
   newtest_ex(pthread_test pthreads.c "" "" "" OFF "pthreads" 0)
-  target_link_libraries(pthread_test pthread)
+  append_test_compile_flags(pthread_test "-Wno-uninitialized")
+  if (NOT ANDROID) # pthread is built in to Bionic
+    target_link_libraries(pthread_test pthread)
+  endif ()
   if (APPLE)
     set(loaderlib_flags "-Wl,-U,_import_does_not_exist")
   else (APPLE)
@@ -570,22 +589,30 @@ if (WIN32)
 endif (WIN32)
 
 if (TOOL_DR_MEMORY)
-  # PR 525807: test malloc stacks
-  newtest(varstack varstack.c)
+  if (NOT ARM) # XXX i#1726: port to ARM
+    # PR 525807: test malloc stacks
+    newtest(varstack varstack.c)
+  endif ()
 
   # PR 464804: test runtime options
   # FIXME: we should set up a suite like DR uses.  For now hand-picking
   # a few to run w/ options.
   newtest_nobuild(leaks-only malloc "" "-leaks_only" "" OFF "")
-  newtest_nobuild(slowpath registers "" "-no_fastpath" "" OFF "registers")
-  newtest_nobuild(slowesp registers "" "-no_esp_fastpath" "" OFF "registers")
+  if (NOT ARM) # XXX i#1726: port to ARM
+    newtest_nobuild(slowpath registers "" "-no_fastpath" "" OFF "registers")
+    newtest_nobuild(slowesp registers "" "-no_esp_fastpath" "" OFF "registers")
+    newtest_nobuild(addronly-reg registers "" "-no_check_uninitialized" "" OFF "")
+  endif ()
   newtest_nobuild(addronly free "" "-light" "" OFF "")
-  newtest_nobuild(addronly-reg registers "" "-no_check_uninitialized" "" OFF "")
   newtest_nobuild(reachable cs2bug "" "-show_reachable" "" OFF ${cs2bug_res})
+  newtest_nobuild(malloc_callstacks cs2bug "" "-light;-malloc_callstacks" ""
+    OFF "cs2bug.light")
   if (USE_DRSYMS)
     newtest_nobuild(nosymcache malloc "" "-no_use_symcache" "" OFF malloc)
   endif (USE_DRSYMS)
-  newtest_nobuild(strict_bitops bitfield "" "-strict_bitops" "" OFF "bitfield.strict")
+  if (NOT ARM) # XXX i#1726: port to ARM
+    newtest_nobuild(strict_bitops bitfield "" "-strict_bitops" "" OFF "bitfield.strict")
+  endif ()
   # test this option to exercise the realloc handling code.
   # note that we can't run the realloc test b/c the races will result in unaddrs.
   newtest_nobuild(noreplace_realloc malloc "" "-no_replace_realloc" "" OFF "malloc")
@@ -594,14 +621,21 @@ if (TOOL_DR_MEMORY)
   newtest_nobuild(redzone1024 malloc "" "-redzone_size;1024" "" OFF "malloc")
   newtest_nobuild_ex(free.exitcode free "" "-exit_code_if_errors;42" "" OFF "free" 42 "")
   newtest_nobuild_ex(hello.exitcode hello "" "-exit_code_if_errors;4" "" OFF "hello" 0 "")
-  newtest_nobuild_ex(blacklist_uninit.op registers ""
-    "-check_uninit_blacklist;registers*" "" OFF "registers.blacklist" 0 "")
-  newtest_nobuild_ex(blacklist_uninit.supp registers ""
-    "-suppress;{DRMEMORY_CTEST_SRC_DIR}/registers.blacklist.suppress"
-    "" OFF "registers.blacklist" 0 "")
+  if (NOT ARM) # XXX i#1726: port to ARM
+    newtest_nobuild_ex(blacklist_uninit.op registers ""
+      "-check_uninit_blacklist;registers*" "" OFF "registers.blacklist" 0 "")
+    newtest_nobuild_ex(blacklist_uninit.supp registers ""
+      "-suppress;{DRMEMORY_CTEST_SRC_DIR}/registers.blacklist.suppress"
+      "" OFF "registers.blacklist" 0 "")
+  endif ()
+  # XXX: ideally we'd run drcov2lcov and test the output too.  For now this
+  # is just a test of the coverage data line output.
+  newtest_nobuild(coverage free "" "-coverage" "" OFF "")
 
   # -replace_malloc is now the default, so test wrapping
-  newtest_nobuild(wrap_malloc malloc "" "-no_replace_malloc" "" OFF "malloc")
+  if (WIN32) # i#1781: fails on many Linux machines so disabling there
+    newtest_nobuild(wrap_malloc malloc "" "-no_replace_malloc" "" OFF "malloc")
+  endif ()
   if ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.2")
     # this test crashes on win8 so we only run it on older Windows
     if (cs2bug_flags STREQUAL "")
@@ -695,7 +729,7 @@ if (TOOL_DR_MEMORY)
     #target_link_libraries(rtl_memory_zones ${ntimp_lib})
     #if (NOT USER_SPECIFIED_DynamoRIO_DIR AND "${CMAKE_GENERATOR}" MATCHES "Visual Studio")
     #  # for parallel build correctness we need a target dependence
-    #  add_dependencies(rtl_memory_zones ntimp_tgt)
+    #  add_dependencies(rtl_memory_zones ntdll_imports)
     #endif ()
 
     if (USE_DRSYMS) # cygwin build can't see static malloc routines
@@ -751,15 +785,17 @@ if (TOOL_DR_MEMORY)
   endif (WIN32)
 
   newtest(realloc realloc.c)
-  if (UNIX)
+  if (UNIX AND NOT ANDROID) # pthread is built in to Bionic
     target_link_libraries(realloc pthread)
-  endif (UNIX)
+  endif ()
 
   newtest(annotations annotations.c)
 
-  if (UNIX)
+  if (UNIX AND NOT ANDROID) # Android doesn't seem to support these alloc routines
     newtest(memalign memalign.c)
-  endif (UNIX)
+    newtest_nobuild(memalign.nodelay memalign "" "-delay_frees;0" "" OFF "memalign")
+    newtest_nobuild(memalign.pattern memalign "" "-light" "" OFF "")
+  endif ()
 
   # persistent cache tests: currently only light mode is supported
   # XXX: would be nice to ensure pcaches are actually generated and used,
@@ -783,10 +819,15 @@ if (TOOL_DR_MEMORY)
   # pattern mode testing.
   newtest_nobuild(free.pattern free "" "-unaddr_only" "" OFF "addronly")
   newtest_nobuild(malloc.pattern malloc "" "-unaddr_only" "" OFF "")
-  newtest_nobuild(registers.pattern registers "" "-unaddr_only" "" OFF "registers.pattern")
+  if (NOT ARM) # XXX i#1726: port to ARM
+    newtest_nobuild(registers.pattern registers "" "-unaddr_only" "" OFF
+      "registers.pattern")
+  endif ()
   newtest_nobuild(track_origins.pattern track_origins ""
     "-unaddr_only;-track_origins_unaddr" "" OFF "track_origins")
-  newtest_nobuild_ex(state.pattern state "" "-unaddr_only" "" OFF "" "ANY" "")
+  if (NOT ARM) # XXX i#1726: port to ARM
+    newtest_nobuild_ex(state.pattern state "" "-unaddr_only" "" OFF "" "ANY" "")
+  endif ()
 else (TOOL_DR_MEMORY)
   newtest_ex(stale stale.c "" "-staleness;-stale_granularity;100" "" OFF "" 0)
 
@@ -798,14 +839,16 @@ else (TOOL_DR_MEMORY)
   set(nudge_test_args "")
 endif (TOOL_DR_MEMORY)
 
-# nudge test: runs infloop in background and runtest.cmake nudges it
-tobuild(infloop infloop.c)
-get_relative_location(infloop infloop_path)
-# we have special support to put run_in_bg and its args first, so we put
-# the test to run as a final drmem arg
-newtest_nobuild(nudge run_in_bg_tgt
-  "-out;./nudge-out"
-  "${nudge_test_args}--;${infloop_path}" "" OFF "")
+if (NOT ARM) # XXX i#1726: port to ARM
+  # nudge test: runs infloop in background and runtest.cmake nudges it
+  tobuild(infloop infloop.c)
+  get_relative_location(infloop infloop_path)
+  # we have special support to put run_in_bg and its args first, so we put
+  # the test to run as a final drmem arg
+  newtest_nobuild(nudge run_in_bg_tgt
+    "-out;./nudge-out"
+    "${nudge_test_args}--;${infloop_path}" "" OFF "")
+endif ()
 if (TOOL_DR_MEMORY AND WIN32)
   # See above for why passing -lib_blacklist_frames 0.
   set(nudge_handle_test_args "-leaks_only;-no_count_leaks;-check_handle_leaks;")
@@ -860,6 +903,10 @@ if (TOOL_DR_MEMORY)
     "" OFF "whitelist")
 endif (TOOL_DR_MEMORY)
 
+if (APPLE)
+  newtest(mac_zones mac_zones.c)
+endif (APPLE)
+
 # XXX i#1660: gtest is not building with clang 6.0
 if (NOT APPLE)
   add_subdirectory(app_suite)
@@ -873,21 +920,35 @@ if (NOT APPLE)
     "-suppress;{DRMEMORY_CTEST_SRC_DIR}/app_suite/default-suppressions.txt"
     # i#1309: turn off some DR debug checking to speed up the test, as it times out
     # on Dr. Heapstat w/ online symbolization.
-    "-checklevel 1" OFF "")
+    # i#1809: turn off ldmps from false pos curiosity
+    "-checklevel 1 -dumpcore_mask 0x877d" OFF "")
   # Ensure ctest itself doesn't time out app_suite (it can take >60s on the bots):
   set_tests_properties(app_suite PROPERTIES TIMEOUT 120)
   if (TOOL_DR_MEMORY)
     newtest_nobuild(app_suite.pattern app_suite_tests ""
       "-unaddr_only;-suppress;{DRMEMORY_CTEST_SRC_DIR}/app_suite/default-suppressions.txt"
-      "" OFF "")
+      # i#1809: turn off ldmps from false pos curiosity
+      "-dumpcore_mask 0x877d" OFF "")
   endif ()
 endif ()
 
 # framework subdir is added at top level b/c wants DR cflags
 
 else (NOT X64)
-  # pattern mode testing.
-  newtest_ex(free.pattern free.c "" "-unaddr_only" "" OFF "addronly" 0)
+  # XXX i#111: we'll eliminate this duplication once we have full mode working --
+  # and when we do, be sure to remove the runtest.cmake auto-ignore of # uninits.
+
+  # default mode == pattern + leaks
+  newtest(hello hello.c)
+  newtest(free free.c)
+  newtest_custbuild(bitfield bitfield.cpp "-DBITFIELD_ASM" bitfield)
+  newtest(patterns patterns.c)
+  newtest_nobuild_ex(free.exitcode free "" "-exit_code_if_errors;42" "" OFF "free" 42 "")
+  newtest_ex(track_origins track_origins.c "" "-light;-track_origins_unaddr" ""
+    OFF "" 0)
+
+  # pattern mode testing w/o leaks
+  newtest_nobuild_ex(free.pattern free "" "-unaddr_only" "" OFF "addronly" 0 "")
   newtest_ex(malloc.pattern malloc.c "" "-unaddr_only" "" OFF "" 0)
   newtest_ex(registers.pattern registers.c "" "-unaddr_only" "" OFF "registers.pattern" 0)
   newtest_ex(track_origins.pattern track_origins.c "" "-unaddr_only;-track_origins_unaddr"
@@ -901,17 +962,18 @@ else (NOT X64)
   endif (WIN32)
 
   # shadow light testing
-  # XXX i#111: we'll eliminate this duplication once we have full mode working --
-  # and when we do, be sure to remove the runtest.cmake auto-ignore of # uninits.
-  newtest(hello hello.c)
-  newtest(free free.c)
-  newtest_custbuild(bitfield bitfield.cpp "-DBITFIELD_ASM" bitfield)
-  newtest(patterns patterns.c)
-  newtest_nobuild_ex(free.exitcode free "" "-exit_code_if_errors;42" "" OFF "free" 42 "")
-  newtest_nobuild_ex(free.exitcode free "" "-exit_code_if_errors;42" "" OFF "free" 42 "")
-  newtest_ex(track_origins track_origins.c "" "-light;-track_origins_unaddr" ""
-    OFF "" 0)
+  newtest_nobuild_ex(hello.shadow hello "" "-pattern;0" "" OFF "hello" 0 "")
+  newtest_nobuild_ex(free.shadow free "" "-pattern;0" "" OFF "free" 0 "")
+  newtest_nobuild_ex(patterns.shadow patterns "" "-pattern;0" "" OFF "patterns" 0 "")
+  if (LINUX)
+    get_relative_location(hello hello_path)
+    newtest_ex(nonaslr nonaslr.c "${hello_path}" "-pattern;0" "" OFF "hello" 0)
+  endif (LINUX)
 endif (NOT X64)
+
+if (TOOL_DR_MEMORY)
+  add_subdirectory(fuzz)
+endif ()
 
 if (APPLE)
   # Enable a few tests for the test suite without perturbing
@@ -919,5 +981,5 @@ if (APPLE)
   # XXX: can we get this to automatically happen for a local "ctest" w/o
   # the user having to pass "-L OSX"?
   set_tests_properties(hello free malloc asmtest bitfield addronly
-    float annotations free.pattern PROPERTIES LABELS OSX)
+    float annotations free.pattern mac_zones PROPERTIES LABELS OSX)
 endif ()

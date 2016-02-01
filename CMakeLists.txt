@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
+# Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 
@@ -25,16 +25,7 @@
 # (For Linux, we also need 2.6.4+ for cmake bug #8639 (asm support broken).)
 cmake_minimum_required(VERSION 2.8.10.1)
 
-if ("${CMAKE_VERSION}" VERSION_EQUAL "2.8.11" OR
-    "${CMAKE_VERSION}" VERSION_GREATER "2.8.11")
-  # XXX DRi#1418: update to cmake 2.8.12's better handling of interface imports
-  cmake_policy(SET CMP0020 OLD)
-endif ()
-
-# XXX i#1663: Dr. Memory does not yet support CMake 3
-if ("${CMAKE_MAJOR_VERSION}" VERSION_EQUAL "3")
-  message(FATAL_ERROR "Dr. Memory does not yet support CMake 3")
-endif ()
+include(make/policies.cmake NO_POLICY_SCOPE)
 
 # like DR, we collapse VS generator into one config since
 # we don't have enough control over output dirs
@@ -76,6 +67,25 @@ if (DEFINED GENERATE_PDBS AND NOT GENERATE_PDBS)
 endif ()
 enable_language(C)
 enable_language(CXX)
+
+# The target OS:
+if (APPLE)
+  set(MACOS 1)
+elseif (UNIX)
+  set(LINUX 1)
+endif (APPLE)
+
+if (CMAKE_SYSTEM_NAME MATCHES "^Android")
+  set(ANDROID 1)
+  set(DEFINES ${DEFINES} -DANDROID)
+endif ()
+
+# The target arch:
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^arm")
+  set(ARM 1)
+else ()
+  set(X86 1)
+endif ()
 
 if (UNIX)
   set(DEFINES ${DEFINES} -DUNIX)
@@ -183,7 +193,7 @@ if (APPLE)
   math(EXPR VERSION_NUMBER_PATCHLEVEL "(${VERSION_NUMBER_PATCHLEVEL} % 200) + 56")
 endif (APPLE)
 
-set(VERSION_NUMBER_DEFAULT "1.8.${VERSION_NUMBER_PATCHLEVEL}")
+set(VERSION_NUMBER_DEFAULT "1.9.${VERSION_NUMBER_PATCHLEVEL}")
 # do not store the default TOOL_VERSION_NUMBER in the cache to prevent a stale one
 # from preventing future version updates in a pre-existing build dir.
 # avoid "VERSION_NUMBER" name since conflics w/ DR's var
@@ -195,6 +205,15 @@ message(STATUS "Dr. Memory version number: ${TOOL_VERSION_NUMBER}")
 
 # Avoid "BUILD_NUMBER" name since conflics w/ DR's var
 set(TOOL_BUILD_NUMBER "1" CACHE STRING "Build number (must be <64K)")
+# However, we do want to set it to avoid "custom build" in messages
+# from embedded DR when run alone (i#1717's dr_set_client_version_string() has
+# already solved this for messages for DrMem on DR).  To make it easy to
+# correlate, we set it to a formula computed from the DrMem ver.
+string(REPLACE "." ";" ver_list ${TOOL_VERSION_NUMBER})
+list(GET ver_list 0 TOOL_VERSION_MAJOR)
+list(GET ver_list 1 TOOL_VERSION_MINOR)
+math(EXPR BUILD_NUMBER
+  "${TOOL_VERSION_MAJOR}*100 + ${TOOL_VERSION_MINOR}*10 + ${VERSION_NUMBER_PATCHLEVEL}")
 
 string(REGEX REPLACE "\\." "," TOOL_VERSION_COMMAS "${TOOL_VERSION_NUMBER}")
 
@@ -277,6 +296,21 @@ endif ()
 
 string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_UPPER)
 
+# i#1781: cmake 2.8.12+ fails to create static lib pdb by default
+# XXX: we should share this with DR's copy
+macro(add_static_lib_debug_info target dest_dir)
+  if (WIN32)
+    if ("${CMAKE_VERSION}" VERSION_EQUAL "3.1" OR
+        "${CMAKE_VERSION}" VERSION_GREATER "3.1")
+      append_property_string(TARGET ${target}
+        COMPILE_PDB_NAME${location_suffix} "${target}"
+        COMPILE_PDB_OUTPUT_DIRECTORY{location_suffix} "${dest_dir}")
+    else ()
+      # We just don't support it for < 3.1
+    endif ()
+  endif ()
+endmacro()
+
 if (UNIX)
   # there's no cmake warning control so we hardcode it
   # disabling strict aliasing since giving weird warning I'm not sure how to fix:
@@ -293,8 +327,19 @@ if (UNIX)
       set(EXTRA_FLAGS "")
     endif ()
   endif ()
+  if (ARM)
+    set(EXTRA_FLAGS "${EXTRA_FLAGS} -mthumb -march=armv7-a")
+    if (ANDROID OR CMAKE_C_LIBRARY_ARCHITECTURE MATCHES "gnueabi$")
+      set(EXTRA_FLAGS "${EXTRA_FLAGS} -mfloat-abi=softfp")
+      # Android requires PIE.  We export symbols to match our test assumptions.
+      set(CMAKE_EXE_LINKER_FLAGS
+        "${CMAKE_EXE_LINKER_FLAGS} -fPIE -pie -Wl,--export-dynamic")
+    endif ()
+  endif ()
   set(CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UPPER}
     "${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UPPER}} ${ARCH_CFLAGS} ${WARN} ${EXTRA_FLAGS}")
+  set(CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}
+    "${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}} ${ARCH_CFLAGS} ${WARN} ${EXTRA_FLAGS}")
 else (UNIX)
   # FIXME i#1204: fix warnings and up to /W4
   set(WARN "/W2 /WX")
@@ -726,7 +771,7 @@ else ()
 endif ()
 
 # when updating this, also update the git submodule
-set(DynamoRIO_VERSION_REQUIRED "5.0.16536")
+set(DynamoRIO_VERSION_REQUIRED "6.0.16832")
 
 set(DR_install_dir "dynamorio")
 
@@ -926,7 +971,12 @@ set(asm_defs ${DR_DEFINES} ${DEFINES} -I "${DynamoRIO_DIR}")
 
 set(asm_deps "${DynamoRIO_DIR}/cpp2asm_defines.h")
 
-add_asm_target(common/asm_utils.asm asm_utils_src asm_utils_tgt ""
+if (ARM)
+  set(asm_file "asm_utils_arm.asm")
+else ()
+  set(asm_file "asm_utils_x86.asm")
+endif ()
+add_asm_target(common/${asm_file} asm_utils_src asm_utils_tgt ""
   "${asm_defs}" "${asm_deps}")
 
 ##################################################
@@ -969,13 +1019,15 @@ if (TOOL_DR_HEAPSTAT)
     common/redblack.c
     common/crypto.c
     # For leak checking we need stack.c but it pulls in the inter-dependent
-    # readwrite, fastpath, and shadow: we'll want those for staleness anyway.
+    # slowpath, fastpath, and shadow: we'll want those for staleness anyway.
     # Looking more and more like Dr. Memory!
     drmemory/annotations.c
     drmemory/leak.c
     drmemory/options.c
     drmemory/stack.c
-    drmemory/readwrite.c
+    drmemory/instru.c
+    drmemory/spill.c
+    drmemory/slowpath.c
     drmemory/fastpath.c
     drmemory/shadow.c
     drmemory/perturb.c)
@@ -984,7 +1036,9 @@ else (TOOL_DR_HEAPSTAT)
   set(srcs
     drmemory/annotations.c
     drmemory/drmemory.c
-    drmemory/readwrite.c
+    drmemory/instru.c
+    drmemory/spill.c
+    drmemory/slowpath.c
     drmemory/fastpath.c
     drmemory/stack.c
     drmemory/shadow.c
@@ -1005,7 +1059,8 @@ else (TOOL_DR_HEAPSTAT)
     common/utils_shared.c
     ${asm_utils_src}
     common/redblack.c
-    common/crypto.c)
+    common/crypto.c
+    drmemory/fuzzer.c)
   if (UNIX)
     if (APPLE)
       set(srcs ${srcs} drmemory/syscall_macos.c)
@@ -1020,6 +1075,16 @@ else (TOOL_DR_HEAPSTAT)
   endif (UNIX)
   set(scripts ${toolname}.pl)
 endif (TOOL_DR_HEAPSTAT)
+
+if (X86)
+  set(srcs ${srcs} drmemory/slowpath_x86.c)
+  set(srcs ${srcs} drmemory/stack_x86.c)
+  set(srcs ${srcs} drmemory/fastpath_x86.c)
+else ()
+  set(srcs ${srcs} drmemory/slowpath_arm.c)
+  set(srcs ${srcs} drmemory/stack_arm.c)
+  set(srcs ${srcs} drmemory/fastpath_arm.c)
+endif ()
 
 if (WIN32)
   set(srcs ${srcs} make/resources.rc)
@@ -1042,6 +1107,14 @@ if (USE_DRSYMS)
     set(frontend_srcs ${frontend_srcs} make/resources.rc)
   endif ()
   add_executable(${toolname} ${frontend_srcs})
+  if (ANDROID AND TOOL_DR_MEMORY)
+    # There's no DT_RPATH support so we have a script set the load path.
+    # To avoid confusion we rename the exe.
+    set(frontend_name "launcher")
+    set_target_properties(${toolname} PROPERTIES OUTPUT_NAME "${frontend_name}")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/${tooldir}/launcher_android.sh"
+      "${PROJECT_BINARY_DIR}/${BUILD_BIN}/${toolname}" @ONLY)
+  endif ()
   if (WIN32)
     target_link_libraries(${toolname} dbghelp)
   endif (WIN32)
@@ -1111,6 +1184,10 @@ use_DynamoRIO_extension(${client_target} drmgr_static)
 use_DynamoRIO_extension(${client_target} drx_static)
 use_DynamoRIO_extension(${client_target} drutil_static)
 use_DynamoRIO_extension(${client_target} drwrap_static)
+use_DynamoRIO_extension(${client_target} drreg_static)
+# DRi#1829: we discussed invoking drcov as a separate client, which would require using
+# all shared ext libs.  We ended up making drcovlib.
+use_DynamoRIO_extension(${client_target} drcovlib_static)
 set_target_properties(${client_target} PROPERTIES
   # dlls are put in runtime dir but we want lib dir
   RUNTIME_OUTPUT_DIRECTORY${location_suffix} "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
@@ -1121,9 +1198,6 @@ if (WIN32)
 
   # This flag is added by VS generators so we may as well add for Ninja
   set(new_flags "/nxcompat")
-
-  # DRi#893: asm code is producing safeseh compilation failures w/ VS2012
-  set(new_flags "${new_flags} /safeseh:no")
 
   # Reduce size by stripping out unused code (we don't seem to need /Gy for this,
   # and VS generators seem to set it already, so we add here for Ninja).
@@ -1187,7 +1261,7 @@ if (WIN32)
     set(dbghelp_lib "${PROJECT_BINARY_DIR}/dynamorio/ext/drsyms/dbghelp_imports.lib")
     if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
       # for parallel build correctness we need a target dependence
-      add_dependencies(${client_target} ntimp_tgt)
+      add_dependencies(${client_target} ntdll_imports)
       if (TOOL_DR_MEMORY)
         add_dependencies(${toolname} dbghelp_tgt)
       endif ()
@@ -1231,14 +1305,12 @@ if (UNIX)
 else (UNIX)
   set(DISABLE_OPTS "/Od")
 endif (UNIX)
-# XXX: if we require cmake 2.8.6 we can use APPEND_STRING.
-# Or we could redo all our flags to be lists and use APPEND.
-get_source_file_property(cur_flags common/alloc_unopt.c COMPILE_FLAGS)
-if (NOT cur_flags)
-  set(cur_flags "")
-endif (NOT cur_flags)
-set_property(SOURCE common/alloc_unopt.c
-  PROPERTY COMPILE_FLAGS "${cur_flags} ${DISABLE_OPTS}")
+append_src_compile_flags(common/alloc_unopt.c "${DISABLE_OPTS}")
+if (UNIX)
+  # i#1776: avoid an infinite loop in replace_memset.
+  # We have no per-function optimization so we apply to the whole file.
+  append_src_compile_flags(drmemory/replace.c "${DISABLE_OPTS}")
+endif ()
 
 # symbol query tool
 set(symquery_srcs tools/symquery.c)
@@ -1537,7 +1609,7 @@ include_directories(${framework_incdir})
 configure_file(framework/drmf.cmake.in
   ${framework_dir}/DrMemoryFrameworkConfig.cmake
   @ONLY)
-foreach (ext drsyscall umbra)
+foreach (ext drsyscall umbra drfuzz)
   file(APPEND ${framework_dir}/DrMemoryFrameworkConfig.cmake "
 set(DynamoRIO_EXT_${ext}_INC \${drmf_cwd}/include)
 ")
@@ -1557,7 +1629,15 @@ endif (X64)
 file(WRITE ${framework_dir}/${exported_targets_name}.cmake "")
 set(exported_targets_append "")
 macro(export_target)
-  export(TARGETS ${ARGV} FILE ${framework_dir}/${exported_targets_name}.cmake
+  if ("${CMAKE_VERSION}" VERSION_EQUAL "3.0" OR
+      "${CMAKE_VERSION}" VERSION_GREATER "3.0")
+    set(tgt_args "")
+  else ()
+    # We use a prefix primarily to make it easy to test the imported targets,
+    # and to give a better "bundled extensions" feel.
+    set(tgt_args NAMESPACE drmf_)
+  endif ()
+  export(TARGETS ${ARGV} ${tgt_args} FILE ${framework_dir}/${exported_targets_name}.cmake
     APPEND)
   set(toadd "
 SET_PROPERTY(TARGET ${ARGV0} PROPERTY MAP_IMPORTED_CONFIG_RELEASE RelWithDebInfo)
@@ -1594,6 +1674,15 @@ add_subdirectory(umbra)
 include_directories(umbra)
 target_link_libraries(${client_target} umbra_int)
 
+# Add drfuzz
+add_subdirectory(drfuzz)
+
+# XXX: change this to find_package() + use_DynamoRIO_extension(drfuzz)
+include_directories(drfuzz)
+if (TOOL_DR_MEMORY)
+  target_link_libraries(${client_target} drfuzz_int)
+endif (TOOL_DR_MEMORY)
+
 if (BUILD_TOOL_TESTS)
   add_subdirectory(tests/framework)
 
@@ -1620,9 +1709,11 @@ if (BUILD_TOOL_TESTS)
     use_DynamoRIO_extension(unit_tests drutil_static)
     use_DynamoRIO_extension(unit_tests drwrap_static)
     use_DynamoRIO_extension(unit_tests drsyms_static)
+    use_DynamoRIO_extension(unit_tests drcovlib_static)
     target_link_libraries(unit_tests drsyscall_int)
     target_link_libraries(unit_tests umbra_int)
     target_link_libraries(unit_tests drsymcache_int)
+    target_link_libraries(unit_tests drfuzz_int)
     set(DynamoRIO_RPATH ${old_rpath})
     add_test(unit_tests "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unit_tests")
   endif (TOOL_DR_MEMORY)
@@ -1652,13 +1743,7 @@ if (install_override)
     CACHE PATH "install path" FORCE)
 endif (install_override)
 
-macro(install_if_32bit)
-  if (NOT X64)
-    install(${ARGV})
-  endif ()
-endmacro(install_if_32bit)
-
-install_if_32bit(TARGETS ${client_target}
+install(TARGETS ${client_target}
   RUNTIME DESTINATION "${INSTALL_LIB}" # dll
   LIBRARY DESTINATION "${INSTALL_LIB}" # .so
   PERMISSIONS ${owner_access} OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
@@ -1699,10 +1784,13 @@ if (WIN32)
       PERMISSIONS ${owner_access} OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
       WORLD_READ WORLD_EXECUTE)
   endif (USE_DRSYMS)
-  install(FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/README
-    DESTINATION "${INSTALL_PREFIX}."
-    RENAME "README.txt")
+  # We want carriage returns for nice viewing in Notepad, etc.:
+  file(READ ${CMAKE_CURRENT_SOURCE_DIR}/README readme_content)
+  string(REPLACE "\n" "\r\n" readme_content ${readme_content})
+  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/README.txt ${readme_content})
+   install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/README.txt
+    DESTINATION "${INSTALL_PREFIX}.")
 else (WIN32)
   install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/README
@@ -1712,11 +1800,11 @@ install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/license.txt
   DESTINATION "${INSTALL_PREFIX}.")
 if (USE_DRSYMS)
-  install_if_32bit(TARGETS ${toolname} DESTINATION "${INSTALL_BIN}"
+  install(TARGETS ${toolname} DESTINATION "${INSTALL_BIN}"
     PERMISSIONS ${owner_access} OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
     WORLD_READ WORLD_EXECUTE)
 else (USE_DRSYMS)
-  install_if_32bit(FILES
+  install(FILES
     ${script_main}
     DESTINATION "${INSTALL_BIN}"
     PERMISSIONS ${owner_access} OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
@@ -1724,8 +1812,15 @@ else (USE_DRSYMS)
 endif (USE_DRSYMS)
 # We put "helper" files inside ${BIN_ARCH}/ so only top-level script is visible
 if (NOT "${script_aux}" STREQUAL "")
-  install_if_32bit(FILES
+  install(FILES
     ${script_aux}
+    DESTINATION "${INSTALL_BIN}"
+    PERMISSIONS ${owner_access} OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+    WORLD_READ WORLD_EXECUTE)
+endif ()
+if (ANDROID AND TOOL_DR_MEMORY)
+  install(FILES
+    "${PROJECT_BINARY_DIR}/${BUILD_BIN}/${toolname}"
     DESTINATION "${INSTALL_BIN}"
     PERMISSIONS ${owner_access} OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
     WORLD_READ WORLD_EXECUTE)
@@ -1755,13 +1850,7 @@ set(install_pdb_exclude
   PATTERN symfetch.pdb EXCLUDE
   PATTERN drstrace_unit_tests.pdb EXCLUDE)
 if (X64)
-  set(install_pdb_exclude
-    ${install_pdb_exclude}
-    PATTERN "${toolname}lib.pdb" EXCLUDE
-    PATTERN "${toolname}lib.debug" EXCLUDE
-    PATTERN "${toolname}.pdb" EXCLUDE
-    PATTERN "${toolname}.debug" EXCLUDE)
-  install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${INSTALL_BIN}/README.txt\" \"Dr. Memory does not yet support 64-bit applications.  The drstrace tool and the Dr. Syscall and Umbra libraries are available for 64-bit.\n\")")
+  install(CODE "file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${INSTALL_BIN}/README.txt\" \"Dr. Memory has preliminary 64-bit support that does not yet include detecting uninitialized reads.  The drstrace tool and the Dr. Syscall and Umbra libraries are fully supported for 64-bit.\n\")")
 endif (X64)
 install(DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/
   DESTINATION "${INSTALL_LIB}"
@@ -1816,10 +1905,7 @@ if (BUILDING_SUB_PACKAGE)
 
 else (BUILDING_SUB_PACKAGE)
   # Include DR so user doesn't have to download separately (PR 457417).
-  # We don't need docs/, include/, or 64-bit.
-  # We do include 32-bit debug lib (and default DR log dir) for
-  # debugging in the field: it does take space but we'd probably regret
-  # not supplying it.
+  # We don't need docs/ or include/.
   install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}\")")
 
   if (UNIX)
@@ -1857,8 +1943,7 @@ else (BUILDING_SUB_PACKAGE)
     if (NOT APPLE) # FIXME DRi#1286: no nudge support yet on MacOS
       install(CODE "configure_file(\"${DynamoRIO_DIR}/../${BIN_ARCH}/nudgeunix\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/${BIN_ARCH}/nudgeunix\" COPYONLY)")
     endif (NOT APPLE)
-    install(CODE "configure_file(\"${DynamoRIO_DIR}/../${LIB_ARCH}/libdrconfiglib${LIB_SFX}\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/${LIB_ARCH}/libdrconfiglib${LIB_SFX}\" COPYONLY)")
-    install(CODE "configure_file(\"${DynamoRIO_DIR}/../${LIB_ARCH}/libdrinjectlib${LIB_SFX}\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/${LIB_ARCH}/libdrinjectlib${LIB_SFX}\" COPYONLY)")
+    # drconfiglib and drinjectlib are now static libs so no need to install
   else (UNIX)
     if (TOOL_DR_HEAPSTAT OR NOT USE_DRSYMS)
       install(CODE "configure_file(\"${DynamoRIO_DIR}/../${BIN_ARCH}/drconfig.exe\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/${BIN_ARCH}/drconfig.exe\" COPYONLY)")
@@ -1870,6 +1955,30 @@ else (BUILDING_SUB_PACKAGE)
     install(CODE "configure_file(\"${DynamoRIO_DIR}/../${BIN_ARCH}/DRcontrol.exe\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/${BIN_ARCH}/DRcontrol.exe\" COPYONLY)")
     install(CODE "configure_file(\"${DynamoRIO_DIR}/../${BIN_ARCH}/DRview.exe\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/${BIN_ARCH}/DRview.exe\" COPYONLY)")
   endif (UNIX)
+
+  if (TOOL_DR_MEMORY)
+    # For the new -coverage feature, we include a copy of drcov2lcov.
+    # We keep it inside the dynamorio/ subdir so its rpath will still work.
+    # XXX: a debug build of drmem pointing at an external DR will pull in a
+    # release-build drcov2lcov whose rpath will point at a release DR yet
+    # we only copy debug DR so it will fail -- we just live with this though
+    # as a full RC package will work fine.
+    if (USER_SPECIFIED_DynamoRIO_DIR)
+      set(covdir tools)
+    else ()
+      set(covdir clients)
+    endif ()
+    if (UNIX)
+      # We can't use get_target_property() for USER_SPECIFIED_DynamoRIO_DIR
+      set(covhelper drcov2lcov)
+    else ()
+      set(covhelper drcov2lcov.exe)
+    endif ()
+    install(CODE "configure_file(\"${DynamoRIO_DIR}/../${covdir}/${BIN_ARCH}/${covhelper}\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/tools/${BIN_ARCH}/${covhelper}\" COPYONLY)")
+    if (WIN32)
+      install(CODE "configure_file(\"${DynamoRIO_DIR}/../${LIB_ARCH}/${build_type}/dynamorio.dll\" \"\${CMAKE_INSTALL_PREFIX}/${DR_install_dir}/tools/${BIN_ARCH}/dynamorio.dll\" COPYONLY)")
+    endif ()
+  endif ()
 endif (BUILDING_SUB_PACKAGE)
 
 # DRMF install rules
@@ -1911,6 +2020,12 @@ endif ()
 
 # "make package package_source"
 
+if (USER_SPECIFIED_DynamoRIO_DIR)
+  set(favicon_path "${DynamoRIO_DIR}/../docs/html/favicon.ico")
+else (USER_SPECIFIED_DynamoRIO_DIR)
+  set(favicon_path "${DynamoRIO_SOURCE_DIR}/api/docs/images/favicon.ico")
+endif (USER_SPECIFIED_DynamoRIO_DIR)
+
 if (UNIX)
   # not bothering with TZ or TBZ2 or STGZ (.sh)
   set(CPACK_GENERATOR "TGZ")
@@ -1928,10 +2043,22 @@ if (UNIX)
     endif (APPLE)
   endif (VMKERNEL)
 else (UNIX)
-  # do not require NSIS, since we do "make package" as part of test suite
-  find_program(NSIS nsis HINT "$ENV{PROGRAMFILES}/NSIS" DOC "NSIS for creating installer")
+  # We don't require NSIS or WIX since we do "make package" as part of test suite
+  set(WIX "WIX-NOTFOUND")
+  set(NSIS "NSIS-NOTFOUND")
+  # Our WIX config requires recent features
+  if ("${CMAKE_VERSION}" VERSION_EQUAL "3.3" OR
+      "${CMAKE_VERSION}" VERSION_GREATER "3.3")
+    # WIX's candle.exe must be on the path for cpack to run it, so hints don't help
+    find_program(WIX candle DOC "WIX for creating installer")
+  endif ()
+  # Prefer WIX
+  if (NOT WIX)
+    find_program(NSIS nsis HINT "$ENV{PROGRAMFILES}/NSIS" DOC
+      "NSIS for creating installer")
+  endif ()
   if (NSIS)
-    message(STATUS "NSIS found: will build installer")
+    message(STATUS "NSIS found: will build NSIS-based installer")
     set(CPACK_GENERATOR "ZIP;NSIS")
     # Ensure we have the NSIS with an 8192 PATH limit (i#1029)
     get_filename_component(nsis_path "${NSIS}" PATH)
@@ -1958,26 +2085,25 @@ else (UNIX)
         message(FATAL_ERROR "Installed NSIS has a too-small path limit.  See i#1029.")
       endif ()
     endif (strings)
-  else (NSIS)
-    # XXX i#1620: To switch entirely from NSIS to WIX
-    # will need to generate GUID's to install over previous NSIS installs and
-    # to make sure registry values are written to that were originally done
-    # with tools/vs_external_tool.c
-    message(STATUS "NSIS not found: will try building with WIX")
-    find_program(WIX candle HINT "$ENV{PROGRAMFILES}/bin" DOC "WIX for creating installer")
-    if (WIX)
-      # Make sure to specify BUILDING_PACKAGE. See i#1099 about absolute path.
-      message(STATUS "WIX found. Using WIX to install")
-      set(CPACK_GENERATOR "ZIP;WIX")
-      # Variables below are set to allow for upgrade but prevent
-      # reinstalling the same version. See i#1620.
-      set(CPACK_WIX_UPGRADE_GUID 1A8D7CEE-2ABA-4462-B0D6-86F26715128E)
-      set(CPACK_WIX_PRODUCT_GUID 67675AD6-1FB0-4DE1-9ECF-84997515025E)
-    else (WIX)
-      message(STATUS "WIX compiler candle.exe not found. Please add it to path or install the WIX tooset. Installing as a Zip")
-      set(CPACK_GENERATOR "ZIP")
-    endif (WIX)
-  endif (NSIS)
+  elseif (WIX)
+    message(STATUS "WIX found: will build WIX-based .msi installer")
+    # Make sure to specify BUILDING_PACKAGE. See i#1099 about absolute path.
+    set(CPACK_GENERATOR "ZIP;WIX")
+    # Variables below are set to allow for upgrade but prevent
+    # reinstalling the same version. See i#1620.
+    set(CPACK_WIX_UPGRADE_GUID 1A8D7CEE-2ABA-4462-B0D6-86F26715128E)
+    set(CPACK_WIX_PRODUCT_GUID 67675AD6-1FB0-4DE1-9ECF-84997515025E)
+    set(CPACK_WIX_PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/make/WIX.patches.in")
+    set(CPACK_WIX_EXTRA_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/make/WIX.extra.in")
+    # This is required for the util:InternetShortcut in WIX.extra.in
+    set(CPACK_WIX_EXTENSIONS "WiXUtilExtension")
+    # This should show up in Add/Remove Programs:
+    set(CPACK_WIX_PROPERTY_ARPURLINFOABOUT "http://drmemory.org")
+    set(CPACK_WIX_PRODUCT_ICON "${favicon_path}")
+  else ()
+    message(STATUS "Neither NSIS nor WIX found (please install and add to path if desired).  Creating only a zip package.")
+    set(CPACK_GENERATOR "ZIP")
+  endif ()
   set(CPACK_SOURCE_GENERATOR "ZIP")
   set(CPACK_SYSTEM_NAME "Windows")
   if (USE_DRSYMS)
@@ -2010,7 +2136,7 @@ if (WIN32 AND NOT BUILDING_SUB_PACKAGE)
   # files due to cpack not preserving symlinks (filed as
   # http://www.itk.org/Bug/view.php?id=10096)
   # We don't need docs/, include/, or 64-bit.
-  # We do include 32-bit debug lib (and default DR log dir) for
+  # We do include the debug lib (and default DR log dir) for
   # debugging in the field: it does take space but we'd probably regret
   # not supplying it.
   if (NOT USER_SPECIFIED_DynamoRIO_DIR)
@@ -2061,14 +2187,8 @@ set(CPACK_NSIS_MENU_LINKS
   # CPACK_PACKAGE_EXECUTABLES list, even though we don't want one.
   "bin/" "Explore ${toolname_cap_spc} (drag your app onto ${toolname}.exe)"
   "${toolname}/docs/html/index.html" "${toolname_cap_spc} documentation"
-  "http://dynamorio.org/${toolname}.html" "${toolname_cap_spc} web page")
-if (USER_SPECIFIED_DynamoRIO_DIR)
-  set(CPACK_NSIS_MUI_ICON "${DynamoRIO_DIR}/../docs/html/favicon.ico")
-  set(CPACK_NSIS_MUI_UNIICON "${DynamoRIO_DIR}/../docs/html/favicon.ico")
-else (USER_SPECIFIED_DynamoRIO_DIR)
-  set(CPACK_NSIS_MUI_ICON "${DynamoRIO_SOURCE_DIR}/api/docs/images/favicon.ico")
-  set(CPACK_NSIS_MUI_UNIICON "${DynamoRIO_SOURCE_DIR}/api/docs/images/favicon.ico")
-endif (USER_SPECIFIED_DynamoRIO_DIR)
+  "http://drmemory.org/" "${toolname_cap_spc} web page")
+set(CPACK_NSIS_MUI_ICON "${favicon_path}")
 # XXX: CPACK_PACKAGE_ICON: need a .bmp
 
 # i#1009c#4: auto-register Dr. Memory as a Visual Studio External Tool

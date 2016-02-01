@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 
@@ -77,7 +77,7 @@ include("${DynamoRIO_DIR}/docs_doxyutils.cmake")
 set(input_paths srcdir outdir optionsdir commondir)
 doxygen_path_xform(${DOXYGEN_EXECUTABLE} "${input_paths}")
 
-configure_file(${commondir_orig}/Doxyfile.in ${outfile} COPY_ONLY)
+configure_file(${commondir_orig}/Doxyfile.in ${outfile} COPYONLY)
 process_doxyfile(${outfile} ${DOXYGEN_EXECUTABLE} ${doxygen_ver})
 
 file(READ ${outfile} string)
@@ -198,6 +198,11 @@ if (WIN32)
     "(ENABLED_SECTIONS[ \t]*=)"
     "\\1 WINDOWS" string "${string}")
 endif (WIN32)
+if (TOOL_DR_MEMORY)
+  string(REGEX REPLACE
+    "(ENABLED_SECTIONS[ \t]*=)"
+    "\\1 TOOL_DR_MEMORY" string "${string}")
+endif (TOOL_DR_MEMORY)
 if (PACKAGED_WITH_DYNAMORIO)
   string(REGEX REPLACE
     "(ENABLED_SECTIONS[ \t]*=)"
@@ -205,12 +210,13 @@ if (PACKAGED_WITH_DYNAMORIO)
 endif()
 
 # XXX: share w/ list of source paths in CMakeLists.txt ${headers}
-set(headers "${commondir}/../drsyscall/drsyscall.h ${commondir}/../umbra/umbra.h")
+set(headers "${commondir}/../drsyscall/drsyscall.h ${commondir}/../umbra/umbra.h ${commondir}/../drfuzz/drfuzz.h ${commondir}/../drfuzz/drfuzz_mutator.h")
 set(headers "${headers} ${commondir}/../drsymcache/drsymcache.h")
 set(headers "${headers} ${outdir}/../drmf/include/drmemory_framework.h")
 if (TOOL_DR_MEMORY)
   string(REGEX REPLACE
-    "using.dox" "using.dox errors.dox reports.dox light.dox" string "${string}")
+    "using.dox" "using.dox errors.dox reports.dox light.dox fuzzer.dox coverage.dox"
+    string "${string}")
   string(REGEX REPLACE
     "main.dox" "main.dox tools.dox ${headers}" string "${string}")
 else ()

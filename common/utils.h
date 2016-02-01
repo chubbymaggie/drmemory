@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -46,6 +46,7 @@
 # define IF_WINDOWS_ELSE(x,y) x
 # define IF_UNIX(x)
 # define IF_UNIX_ELSE(x,y) y
+# define IF_LINUX(x)
 # define IF_LINUX_ELSE(x,y) y
 # define IF_UNIX_(x)
 #else
@@ -63,7 +64,7 @@
 # else
 #  define IF_LINUX(x)
 #  define IF_LINUX_ELSE(x,y) y
-#  define IF_LINUX_(x) x,
+#  define IF_LINUX_(x)
 # endif
 #endif
 
@@ -74,17 +75,73 @@
 #else
 # define IF_MACOS(x)
 # define IF_MACOS_ELSE(x,y) y
-# define IF_MACOS_(x) x,
+# define IF_MACOS_(x)
 #endif
 
-#ifdef X64
-# define IF_X64(x) x
-# define IF_X86_32(x)
-# define IF_X86_32_(x)
+#ifdef ANDROID
+# define IF_ANDROID(x) x
+# define IF_ANDROID_ELSE(x,y) x
 #else
-# define IF_X64(x)
-# define IF_X86_32(x) x
-# define IF_X86_32_(x) x,
+# define IF_ANDROID(x)
+# define IF_ANDROID_ELSE(x,y) y
+#endif
+
+#ifndef IF_X64
+# ifdef X64
+#  define IF_X64(x) x
+# else
+#  define IF_X64(x)
+# endif
+#endif
+
+#ifndef IF_NOT_X64
+# ifdef X64
+#  define IF_NOT_X64(x)
+# else
+#  define IF_NOT_X64(x) x
+# endif
+#endif
+
+#ifndef IF_NOT_X64_
+# ifdef X64
+#  define IF_NOT_X64_(x)
+# else
+#  define IF_NOT_X64_(x) x,
+# endif
+#endif
+
+#ifdef X86
+# ifndef IF_X86
+#  define IF_X86(x) x
+#  define IF_X86_ELSE(x, y) x
+# endif
+# ifdef X64
+#  ifndef IF_X86_32
+#   define IF_X86_32(x)
+#  endif
+#  define IF_X86_32_(x)
+# else
+#  ifndef IF_X86_32
+#   define IF_X86_32(x) x
+#  endif
+#  define IF_X86_32_(x) x,
+# endif
+#else
+# ifndef IF_X86
+#  define IF_X86(x)
+#  define IF_X86_ELSE(x, y) y
+# endif
+# define IF_X86_32_(x)
+#endif
+
+#ifndef IF_ARM
+# ifdef ARM
+#  define IF_ARM(x) x
+#  define IF_ARM_ELSE(x, y) x
+# else
+#  define IF_ARM(x)
+#  define IF_ARM_ELSE(x, y) y
+# endif
 #endif
 
 #ifdef DEBUG
@@ -135,6 +192,9 @@
 #define TEST(mask, var) (((mask) & (var)) != 0)
 #define TESTANY TEST
 #define TESTALL(mask, var) (((mask) & (var)) == (mask))
+#define TESTONE(mask, var) test_one_bit_set((mask) & (var))
+
+#define IS_POWER_OF_2(x) ((x) != 0 && ((x) & ((x)-1)) == 0)
 
 #define EXPANDSTR(x) #x
 #define STRINGIFY(x) EXPANDSTR(x)
@@ -212,6 +272,7 @@
 #ifdef WINDOWS
 # define CHECK_TRUNCATE_RANGE_ULONG(val) CHECK_TRUNCATE_RANGE_uint(val)
 #endif
+#define CHECK_TRUNCATE_RANGE_ushort(val)   ((val) >= 0 && (val) <= USHRT_MAX)
 #define ASSERT_TRUNCATE_TYPE(var, type) ASSERT(sizeof(var) == sizeof(type), \
                                                "mismatch "#var" and "#type)
 /* check no precision lose on typecast from val to var.
@@ -222,6 +283,18 @@
     ASSERT(CHECK_TRUNCATE_RANGE_##type(val),        \
            "truncating value to ("#type")"#var);    \
 } while (0)
+
+#ifdef X86
+# define MC_RET_REG(mc) (mc)->xax
+# define MC_FP_REG(mc)  (mc)->xbp
+# define MC_SP_REG(mc)  (mc)->xsp
+#elif defined(ARM)
+# define MC_RET_REG(mc) (mc)->r0
+# define MC_FP_REG(mc)  (mc)->r11
+# define MC_SP_REG(mc)  (mc)->sp
+#endif
+
+#define DR_REG_PTR_RETURN IF_X86_ELSE(DR_REG_XAX, DR_REG_R0)
 
 /* globals that affect NOTIFY* and *LOG* macros */
 extern bool op_print_stderr;
@@ -572,9 +645,10 @@ extern int tls_idx_util;
 #endif
 
 #ifdef UNIX
-# define ATOMIC_INC32(x) __asm__ __volatile__("lock incl %0" : "=m" (x) : : "memory")
-# define ATOMIC_DEC32(x) __asm__ __volatile__("lock decl %0" : "=m" (x) : : "memory")
-# define ATOMIC_ADD32(x, val) \
+# ifdef X86
+#  define ATOMIC_INC32(x) __asm__ __volatile__("lock incl %0" : "=m" (x) : : "memory")
+#  define ATOMIC_DEC32(x) __asm__ __volatile__("lock decl %0" : "=m" (x) : : "memory")
+#  define ATOMIC_ADD32(x, val) \
     __asm__ __volatile__("lock addl %1, %0" : "=m" (x) : "r" (val) : "memory")
 
 static inline int
@@ -585,6 +659,60 @@ atomic_add32_return_sum(volatile int *x, int val)
                          : "1" (val) : "memory");
     return (cur + val);
 }
+# elif defined(ARM)
+/* XXX: should DR export these for us? */
+#  define ATOMIC_INC32(x)                                   \
+     __asm__ __volatile__(                                  \
+       "1: ldrex r2, %0         \n\t"                       \
+       "   add   r2, r2, #1     \n\t"                       \
+       "   strex r3, r2, %0     \n\t"                       \
+       "   cmp   r3, #0         \n\t"                       \
+       "   bne   1b             \n\t"                       \
+       "   cmp   r2, #0" /* for possible SET_FLAG use */    \
+       : "=Q" (x) /* no offset for ARM mode */              \
+       : : "cc", "memory", "r2", "r3")
+#  define ATOMIC_DEC32(x)                                   \
+     __asm__ __volatile__(                                  \
+       "1: ldrex r2, %0         \n\t"                       \
+       "   sub   r2, r2, #1     \n\t"                       \
+       "   strex r3, r2, %0     \n\t"                       \
+       "   cmp   r3, #0         \n\t"                       \
+       "   bne   1b             \n\t"                       \
+       "   cmp   r2, #0" /* for possible SET_FLAG use */    \
+       : "=Q" (x) /* no offset for ARM mode */              \
+       : : "cc", "memory", "r2", "r3")
+#  define ATOMIC_ADD32(x, val)                              \
+     __asm__ __volatile__(                                  \
+       "1: ldrex r2, %0         \n\t"                       \
+       "   add   r2, r2, %1     \n\t"                       \
+       "   strex r3, r2, %0     \n\t"                       \
+       "   cmp   r3, #0         \n\t"                       \
+       "   bne   1b             \n\t"                       \
+       "   cmp   r2, #0" /* for possible SET_FLAG use */    \
+       : "=Q" (x) /* no offset for ARM mode */              \
+       : "r"  (val)                                         \
+       : "cc", "memory", "r2", "r3")
+#  define ATOMIC_ADD_EXCHANGE32(x, val, result)             \
+     __asm__ __volatile__(                                  \
+       "1: ldrex r2, %0         \n\t"                       \
+       "   add   r2, r2, %2     \n\t"                       \
+       "   strex r3, r2, %0     \n\t"                       \
+       "   cmp   r3, #0         \n\t"                       \
+       "   bne   1b             \n\t"                       \
+       "   sub   r2, r2, %2     \n\t"                       \
+       "   str   r2, %1"                                    \
+       : "=Q" (*x), "=m" (result)                           \
+       : "r"  (val)                                         \
+       : "cc", "memory", "r2", "r3")
+
+static inline int
+atomic_add32_return_sum(volatile int *x, int val)
+{
+    int temp;
+    ATOMIC_ADD_EXCHANGE32(x, val, temp);
+    return (temp + val);
+}
+# endif
 #else
 # define ATOMIC_INC32(x) _InterlockedIncrement((volatile LONG *)&(x))
 # define ATOMIC_DEC32(x) _InterlockedDecrement((volatile LONG *)&(x))
@@ -703,6 +831,12 @@ unsigned_multiply_will_overflow(size_t m, size_t n);
 
 void
 crash_process(void);
+
+static inline bool
+test_one_bit_set(uint x)
+{
+    return (x > 0) && (x & (x-1)) == 0;
+}
 
 /***************************************************************************
  * WINDOWS SYSCALLS
@@ -833,6 +967,9 @@ heap_dump_stats(file_t f);
 char *
 drmem_strdup(const char *src, heapstat_t type);
 
+/* note: Guarantees that even if src overflows max, the allocated buffer will be
+ * large enough for max characters plus the null-terminator.
+ */
 char *
 drmem_strndup(const char *src, size_t max, heapstat_t type);
 
@@ -848,7 +985,7 @@ drmem_strndup(const char *src, size_t max, heapstat_t type);
  */
 #define MAX_OPTION_LEN DR_MAX_OPTIONS_LENGTH
 
-#ifndef MACOS /* available on Mac */
+#if !defined(MACOS) && !defined(ANDROID) && !defined(NOLINK_STRCASESTR)
 const char *
 strcasestr(const char *text, const char *pattern);
 #endif
@@ -870,6 +1007,14 @@ const char *
 text_contains_any_string(const char *text, const char *patterns, bool ignore_case,
                          const char **matched);
 
+/* For parsing an mmapped file into lines: returns the start of the next line.
+ * Optionally returns the start of this line after skipping whitespace (if skip_ws)
+ * in "sol" and the end of the line (prior to any whitespace, if skip_ws) in "eol".
+ */
+const char *
+find_next_line(const char *start, const char *eof, const char **sol OUT,
+               const char **eol OUT, bool skip_ws);
+
 /***************************************************************************
  * REGISTER CONVERSION UTILITIES
  */
@@ -880,8 +1025,10 @@ reg_ptrsz_to_16(reg_id_t reg);
 reg_id_t
 reg_ptrsz_to_8(reg_id_t reg);
 
+#ifdef X86
 reg_id_t
 reg_ptrsz_to_8h(reg_id_t reg);
+#endif
 
 reg_id_t
 reg_to_size(reg_id_t reg, opnd_size_t size);

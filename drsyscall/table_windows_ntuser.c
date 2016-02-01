@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /* Dr. Memory: the memory debugger
@@ -33,6 +33,7 @@
 #include "../wininc/ndk_extypes.h" /* required by ntuser.h */
 #include "../wininc/ntuser.h"
 #include "../wininc/ntuser_win8.h"
+#include "../wininc/ntuser_ex.h"
 
 /***************************************************************************/
 /* System calls with wrappers in user32.dll.
@@ -183,9 +184,9 @@ syscall_info_t syscall_user32_info[] = {
     {{0,0},"NtUserBuildPropList", OK, RNTST, 4,
      {
          {0, sizeof(HWND), SYSARG_INLINED, DRSYS_TYPE_HANDLE},
-         {1, -2, W|HT, DRSYS_TYPE_STRUCT},
-         {1, -3, WI|HT, DRSYS_TYPE_STRUCT},
-         {2, sizeof(DWORD), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
+         {1, sizeof(DWORD), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
+         {2, -1, W|SYSARG_SIZE_IN_ELEMENTS, sizeof(USER_PROP_LIST_ENTRY)},
+         {2, -3, WI|SYSARG_SIZE_IN_ELEMENTS, sizeof(USER_PROP_LIST_ENTRY)},
          {3, sizeof(DWORD), W|HT, DRSYS_TYPE_UNSIGNED_INT},
      }
     },
@@ -1253,8 +1254,9 @@ syscall_info_t syscall_user32_info[] = {
      * param and 6th param.  However, enough are identical for our purposes that
      * we handle in code.  That's based on an early examination: if more and
      * more need special handling we may want to switch to a secondary table(s).
+     * The return value is an LRESULT.
      */
-    {{0,0},"NtUserMessageCall", OK, SYSARG_TYPE_BOOL32, 7,
+    {{0,0},"NtUserMessageCall", OK, SYSARG_TYPE_SINT32, 7,
      {
          {0, sizeof(HANDLE),  SYSARG_INLINED,    DRSYS_TYPE_HANDLE},
          {1, sizeof(UINT),    SYSARG_INLINED,    DRSYS_TYPE_UNSIGNED_INT},
@@ -1263,7 +1265,11 @@ syscall_info_t syscall_user32_info[] = {
           * XXX: non-memarg client would want secondary table(s)!
           */
          {3, sizeof(LPARAM),  SYSARG_INLINED,    DRSYS_TYPE_SIGNED_INT},
-         /* 4th param is sometimes IN and sometimes OUT so we special-case it */
+         /* 4th param is sometimes IN and sometimes OUT so we special-case it.
+          * XXX: however, now that we know the syscall return is
+          * LRESULT (i#1752), and this param always seems to be NULL,
+          * we may need to revisit what type it really is.
+          */
          {4, sizeof(LRESULT), SYSARG_NON_MEMARG, DRSYS_TYPE_UNSIGNED_INT},
          {5, sizeof(DWORD),   SYSARG_INLINED,    DRSYS_TYPE_UNSIGNED_INT},
          {6, sizeof(BOOL),    SYSARG_INLINED,    DRSYS_TYPE_BOOL},
@@ -2436,6 +2442,70 @@ syscall_info_t syscall_user32_info[] = {
     {{WIN81,0},"NtUserTransformPoint", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
     {{WIN81,0},"NtUserTransformRect", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
     {{WIN81,0},"NtUserUpdateWindowInputSinkHints", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+
+    /***************************************************/
+    /* Added in Windows 10 */
+    /* FIXME i#1750: fill in details */
+    {{WIN10,0},"NtCreateImplicitCompositionInputSink", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtDCompositionCapturePointer", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtDCompositionDuplicateSwapchainHandleToDwm", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtDCompositionEnableDDASupport", UNKNOWN, DRSYS_TYPE_UNKNOWN, 0, },
+    {{WIN10,0},"NtDCompositionEnableMMCSS", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtDCompositionGetAnimationTime", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtDCompositionRegisterVirtualDesktopVisual", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtDCompositionSetChannelCallbackId", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtDCompositionSetResourceCallbackId", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtDCompositionSetVisualInputSink", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtDCompositionUpdatePointerCapture", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtDesktopCaptureBits", UNKNOWN, DRSYS_TYPE_UNKNOWN, 8, },
+    {{WIN10,0},"NtHWCursorUpdatePointer", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtQueryCompositionInputIsImplicit", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtQueryCompositionInputQueueAndTransform", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtQueryCompositionInputSinkViewId", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtRIMAddInputObserver", UNKNOWN, DRSYS_TYPE_UNKNOWN, 7, },
+    {{WIN10,0},"NtRIMGetDevicePreparsedDataLockfree", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtRIMObserveNextInput", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtRIMRemoveInputObserver", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtRIMUpdateInputObserverRegistration", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtSetCompositionSurfaceAnalogExclusive", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtTokenManagerConfirmOutstandingAnalogToken", UNKNOWN, DRSYS_TYPE_UNKNOWN, 0, },
+    {{WIN10,0},"NtTokenManagerGetAnalogExclusiveSurfaceUpdates", UNKNOWN, DRSYS_TYPE_UNKNOWN, 5, },
+    {{WIN10,0},"NtTokenManagerGetAnalogExclusiveTokenEvent", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtTokenManagerOpenSectionAndEvents", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtUserDwmKernelShutdown", UNKNOWN, DRSYS_TYPE_UNKNOWN, 0, },
+    {{WIN10,0},"NtUserDwmKernelStartup", UNKNOWN, DRSYS_TYPE_UNKNOWN, 0, },
+    {{WIN10,0},"NtUserEnableChildWindowDpiMessage", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserGetDManipHookInitFunction", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserGetDpiMetrics", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserGetPointerFrameArrivalTimes", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtUserInitializeInputDeviceInjection", UNKNOWN, DRSYS_TYPE_UNKNOWN, 7, },
+    {{WIN10,0},"NtUserInitializePointerDeviceInjection", UNKNOWN, DRSYS_TYPE_UNKNOWN, 5, },
+    {{WIN10,0},"NtUserInjectDeviceInput", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtUserInjectKeyboardInput", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserInjectMouseInput", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserInjectPointerInput", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtUserIsChildWindowDpiMessageEnabled", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtUserIsWindowBroadcastingDpiToChildren", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtUserNavigateFocus", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserRegisterDManipHook", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtUserRegisterManipulationThread", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN10,0},"NtUserRegisterShellPTPListener", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserReleaseDwmHitTestWaiters", UNKNOWN, DRSYS_TYPE_UNKNOWN, 0, },
+    {{WIN10,0},"NtUserSetActiveProcessForMonitor", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserSetCoreWindow", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtUserSetCoreWindowPartner", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtUserSetFeatureReportResponse", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtUserSetManipulationInputTarget", UNKNOWN, DRSYS_TYPE_UNKNOWN, 4, },
+    {{WIN10,0},"NtUserSetWindowArrangement", UNKNOWN, DRSYS_TYPE_UNKNOWN, 3, },
+    {{WIN10,0},"NtUserSetWindowShowState", UNKNOWN, DRSYS_TYPE_UNKNOWN, 2, },
+    {{WIN10,0},"NtVisualCaptureBits", UNKNOWN, DRSYS_TYPE_UNKNOWN, 9, },
+    /* Added in Windows 10 1511 */
+    /* FIXME i#1750: fill in details */
+    {{WIN11,0},"NtCompositionSetDropTarget", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN11,0},"NtDCompositionAttachMouseWheelToHwnd", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN11,0},"NtSetCompositionSurfaceBufferCompositionModeAndOrientation", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN11,0},"NtUserRemoveInjectionDevice", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
+    {{WIN11,0},"NtUserUpdateWindowTrackingInfo", UNKNOWN, DRSYS_TYPE_UNKNOWN, 1, },
 };
 #define NUM_USER32_SYSCALLS \
     (sizeof(syscall_user32_info)/sizeof(syscall_user32_info[0]))

@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010 Google, Inc.  All rights reserved.
+# Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
 # Copyright (c) 2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 #
@@ -20,10 +20,10 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 success
-~~Dr.M~~ NO ERRORS FOUND:
-~~Dr.M~~       0 unique,     0 total unaddressable access(es)
+~~Dr.M~~ ERRORS FOUND:
+~~Dr.M~~      12 unique,    12 total unaddressable access(es)
 ~~Dr.M~~       0 unique,     0 total uninitialized access(es)
 ~~Dr.M~~       0 unique,     0 total invalid heap argument(s)
-~~Dr.M~~       0 unique,     0 total warning(s)
+~~Dr.M~~       1 unique,     1 total warning(s)
 ~~Dr.M~~       0 unique,     0 total,      0 byte(s) of leak(s)
 ~~Dr.M~~       0 unique,     0 total,      0 byte(s) of possible leak(s)

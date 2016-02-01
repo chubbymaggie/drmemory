@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 # **********************************************************
-# Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
 # **********************************************************
 
 # Dr. Memory: the memory debugger
@@ -20,11 +20,16 @@
 # License along with this library; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+# This script formats system call numbers into columns for drsyscall/drsyscall_numx.h.
+# The numbers are obtained from the output of DR's winsysnums tool on system dlls+pdbs.
+# An example of usage:
+# % tools/sysnums.pl NTDLL <path-to-drmemory>/drsyscall/drsyscall_numx.h ntdll.dll/10.0.10586.20-x86/syscalls ntdll.dll/10.0.10586.20-wow64/syscalls ntdll.dll/10.0.10586.20-x64/syscalls
+
 use strict;
 
 my %name_map = (
-    # special case
-    'GetThreadDesktop' => 'NtUserGetThreadDesktop-SPECIALCASED',
+    # special case: "Desktoa" to precede "Desktop" :)
+    'GetThreadDesktop' => 'NtUserGetThreadDesktoa-SPECIALCASED',
 
     'NtUserControlMagnification' => 'NtUserMagControl',
     'NtUserGetMagnificationLensCtxInformation' => 'NtUserMagGetContextInformation',
@@ -39,6 +44,8 @@ my %name_map = (
     'NtUserPrivateSetRipFlags' => 'NtUserSetRipFlags',
     'NtUserRealEnableScrollBar' => 'NtUserEnableScrollBar',
 
+    'RtlGetCurrentProcessorNumber' => 'NtGetCurrentProcessorNumber',
+
     # win8
     'NtUserSkipPointerFrameMessages' => 'NtUserDiscardPointerFrameMessages',
     'NtUserSetCoalescableTimer' => 'NtUserSetTimer',
@@ -47,7 +54,10 @@ my %name_map = (
 
     # win8.1
     'NtUserPhysicalToLogicalPointForPerMonitorDPI' => 'NtUserPerMonitorDPIPhysicalToLogicalPoint',
-     'NtUserLogicalToPhysicalPointForPerMonitorDPI' => 'NtUserLogicalToPerMonitorDPIPhysicalPoint',
+    'NtUserLogicalToPhysicalPointForPerMonitorDPI' => 'NtUserLogicalToPerMonitorDPIPhysicalPoint',
+
+    # win10
+    "NtUserGetDpiSystemMetrics" => "NtUserGetDpiMetrics",
 
     # imm32
     'NtUserImmDisableIme' => 'NtUserDisableThreadIme',
@@ -94,6 +104,13 @@ my %user32_delete = (
     'NtUserTestWindowProcess' => 1,
     );
 
+# On Win10 this shows up in our syscalls files but it matches
+# NtQuerySystemInformation for x64 but NtWow64GetNativeSystemInformation
+# for wow64.  Best to just throw it out.
+my %ntdll_delete = (
+    "RtlGetNativeSystemInformation" => 1,
+    );
+
 my %imm32_only = (
     # These we list only under imm32 as on some platforms the wrapper is not
     # in user32:
@@ -125,7 +142,7 @@ shift;
 my $new_os = @ARGV;
 my $old_os = 0;
 
-my @big;
+my @maxlen;
 
 open(IN,"<$existing") || die"Error opening $existing\n";
 while (<IN>) {
@@ -145,7 +162,8 @@ while (<IN>) {
         for (my $m = 0; $m < @matches; $m++) {
             # we append to the end, so old OS entries go first
             $nums{$name}[$m] = $matches[$m];
-            $big[$m] = (length($matches[$m]) > 6);
+            $maxlen[$m] = length($matches[$m])
+                unless (length($matches[$m]) < $maxlen[$m]);
         }
     }
 }
@@ -160,19 +178,21 @@ if ($prefix =~ /USER32/ || $prefix =~ /IMM32/) {
 $os = $old_os;
 while ($#ARGV >= 0) {
     open(IN,"<$ARGV[0]") || die"Error opening $ARGV[0]\n";
+    $maxlen[$os] = 0;
     while (<IN>) {
         if (/(0x\w+) .*= (\w+)/) {
             my $sysnum = $1;
             my $name = $2;
 
-            # only wow64 needs more than 4 digits
-            if (length($sysnum) > 6 && $ARGV[0] !~ /wow64/) {
-                die "non-wow64 has upper digits: $_" if ($sysnum !~ /^0x0000/);
-                $sysnum =~ s/^0x0000/0x/;
-                $big[$os] = 0;
-            } else {
-                $big[$os] = (length($sysnum) > 6);
+            # only wow64 needs more than 4 digits, and only for later OS versions
+            if (length($sysnum) > 6 && $sysnum !~ /^0x0000/) {
+                die "non-wow64 has upper digits: $_" if ($ARGV[0] !~ /wow64/);
             }
+            # We want all columns to be minimal length for max digits so we remove
+            # leading zeroes here and re-add later to match max.
+            $sysnum =~ s/0x0*/0x/;
+            $maxlen[$os] = length($sysnum)
+                unless (length($sysnum) < $maxlen[$os]);
 
             # normalize the names
             $name =~ s/^Zw/Nt/;
@@ -190,6 +210,7 @@ while ($#ARGV >= 0) {
             next if ($name =~ /^NtGdiD3DKMT/);
 
             next if ($prefix =~ /USER32/ && defined($user32_delete{$name}));
+            next if ($prefix =~ /NTDLL/ && defined($ntdll_delete{$name}));
             next if ($prefix =~ /USER32/ && defined($imm32_only{$name}));
             # XXX: there could be new imm32-only wrappers that we'll miss this way!
             next if ($prefix =~ /IMM32/ && !defined($imm32_only{$name}));
@@ -212,21 +233,27 @@ while ($#ARGV >= 0) {
 }
 
 foreach my $n (sort (keys %nums)) {
-    if ($n eq 'NtUserGetThreadDesktop-SPECIALCASED') {
+    if ($n eq 'NtUserGetThreadDesktoa-SPECIALCASED') {
         # preserve the comment and extra entry
         $n = 'GetThreadDesktop';
-        printf "/* i#487: this has a different sysnum on some platforms */\n";
+        printf "/* i#487: this has a different sysnum on some platforms.  It must be before NtUserGetThreadDesktop (i#1418). */\n";
     }
     printf "%s(%-50s", $prefix, $n;
     for (my $i = 0; $i < $os; $i++) {
         if (defined($nums{$n}[$i])) {
-            printf ", %s", $nums{$n}[$i];
-        } else {
-            if ($big[$i]) {
-                printf ",       NONE";
-            } else {
-                printf ",   NONE";
+            # Add leading zeroes to match max length of this column
+            for (my $l = length($nums{$n}[$i]); $l < $maxlen[$i]; $l++) {
+                $nums{$n}[$i] =~ s/0x/0x0/;
+                $nums{$n}[$i] =~ s/NONE/ NONE/;
             }
+            printf ",%s", $nums{$n}[$i];
+        } else {
+            # Start w/ max padding and remove to match max length for this column
+            my $s = ",      NONE";
+            for (my $l = 10; $l > $maxlen[$i]; $l--) {
+                $s =~ s/, /,/;
+            }
+            printf "$s";
         }
     }
     print ")\n";

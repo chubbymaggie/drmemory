@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2016 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /* Dr. Memory: the memory debugger
@@ -24,8 +24,10 @@
  */
 
 #include "dr_api.h"
+#include "drreg.h"
 #include "drmemory.h"
-#include "readwrite.h"
+#include "slowpath.h"
+#include "spill.h"
 #include "pattern.h"
 #include "shadow.h"
 #include "stack.h"
@@ -45,8 +47,6 @@
 
 #define MAX_NUM_CHECKS_PER_REF 4
 #define MAX_REFS_PER_INSTR 3
-#define PATTERN_SLOT_XAX    SPILL_SLOT_1
-#define PATTERN_SLOT_AFLAGS SPILL_SLOT_2
 #define SWAP_BYTE(x)  ((0x0ff & ((x) >> 8)) | ((0x0ff & (x)) << 8))
 #define PATTERN_REVERSE(x) (SWAP_BYTE(x) | (SWAP_BYTE(x) << 16))
 
@@ -57,17 +57,7 @@ static uint  pattern_reverse;
 static bool  pattern_4byte_check_only = false;
 static void *flush_lock;
 
-static ptr_uint_t note_base;
 static int num_2byte_faults = 0;
-
-enum {
-    NOTE_NULL = 0,
-    NOTE_SAVE_AFLAGS,
-    NOTE_SAVE_AFLAGS_WITH_EAX,    /* need restore app's EAX after */
-    NOTE_RESTORE_AFLAGS,
-    NOTE_RESTORE_AFLAGS_WITH_EAX, /* need restore aflags to EAX first */
-    NOTE_MAX_VALUE,
-};
 
 /* check if the opnd should be instrumented for checks */
 bool
@@ -81,44 +71,56 @@ pattern_opnd_needs_check(opnd_t opnd)
      */
     if (opnd_is_abs_addr(opnd))
         return false;
-#ifdef X64
+#if defined(X64) || defined(ARM)
     if (opnd_is_rel_addr(opnd))
+        return false;
+#endif
+#if defined(UNIX) && defined(X86)
+    /* FIXME i#1812: check app TLS accesses.
+     * DynamoRIO steals both TLS segment registers and mangles all app TLS accesses.
+     * To check an app TLS access, we need extra instrumentation to steal a
+     * register for holding app TLS segment base.
+     */
+    /* Assuming all non-TLS segment bases are 0, we can check those memory
+     * accesses without special handling.
+     */
+    if (opnd_is_far_base_disp(opnd) &&
+        (opnd_get_segment(opnd) == SEG_GS || opnd_get_segment(opnd) == SEG_FS))
         return false;
 #endif
     ASSERT(opnd_is_base_disp(opnd), "not a base disp opnd");
     return true;
 }
 
+#ifdef X86
 static void
 pattern_handle_xlat(void *drcontext, instrlist_t *ilist, instr_t *app, bool pre)
 {
-    /* xlat accesses memory (xbx, al), which is not a legeal memory operand,
+    /* xlat accesses memory (xbx, al), which is not a legal memory operand,
      * and we use (xbx, xax) to emulate (xbx, al) instead:
      * save xax; movzx xax, al; ...; restore xax; ...; xlat
      */
+    IF_DEBUG(drreg_status_t res);
     if (pre) {
-        /* we do not rely on whole_bb_spills_enabled to save eax!
-         * for cases like:
-         * aflags save; mov 0 => [mem], mov 1 => eax; xlat;
-         * the value in spill_slot_5 is out-of-date!
-         */
-        spill_reg(drcontext, ilist, app, DR_REG_XAX,
-                  whole_bb_spills_enabled() ?
-                  /* when whole_bb_spills_enabled, app's xax value is stored
-                   * in SPILL_SLOT_5 in save_aflags_if_live, so are we here
-                   * for consistency.
-                   */
-                  SPILL_SLOT_5 : PATTERN_SLOT_XAX);
+        drvector_t allowed;
+        reg_id_t scratch;
+        drreg_init_and_fill_vector(&allowed, false);
+        drreg_set_vector_entry(&allowed, DR_REG_XAX, true);
+        IF_DEBUG(res =)
+            drreg_reserve_register(drcontext, ilist, app, &allowed, &scratch);
+        ASSERT(res == DRREG_SUCCESS && scratch == DR_REG_XAX, "failed to reserve eax");
+        drvector_delete(&allowed);
         PRE(ilist, app, INSTR_CREATE_movzx(drcontext,
                                            opnd_create_reg(DR_REG_XAX),
                                            opnd_create_reg(DR_REG_AL)));
     } else {
         /* restore xax */
-        restore_reg(drcontext, ilist, app, DR_REG_XAX,
-                    whole_bb_spills_enabled() ?
-                    SPILL_SLOT_5 : PATTERN_SLOT_XAX);
+        IF_DEBUG(res =)
+            drreg_unreserve_register(drcontext, ilist, app, DR_REG_XAX);
+        ASSERT(res == DRREG_SUCCESS, "reg unreserve should work");
     }
 }
+#endif
 
 /* Insert the code for pattern check on operand refs.
  * The instr sequence instrumented here is used in fault handling for
@@ -127,6 +129,7 @@ pattern_handle_xlat(void *drcontext, instrlist_t *ilist, instr_t *app, bool pre)
  * - ill_instr_is_instrumented and
  * - segv_instr_is_instrumented
  * must be updated too.
+ * The caller is responsible for preserving aflags.
  */
 static void
 pattern_insert_cmp_jne_ud2a(void *drcontext, instrlist_t *ilist, instr_t *app,
@@ -134,18 +137,114 @@ pattern_insert_cmp_jne_ud2a(void *drcontext, instrlist_t *ilist, instr_t *app,
 {
     instr_t *label;
     app_pc pc = instr_get_app_pc(app);
+#ifdef ARM
+    uint i;
+    IF_DEBUG(drreg_status_t res;)
+    reg_id_t scratch, scratch2;
+    dr_pred_type_t pred = instr_get_predicate(app);
+    instr_t *in;
+    uint val = opnd_get_immed_int(pattern);
+#endif
 
     label = INSTR_CREATE_label(drcontext);
     /* cmp ref, pattern */
+#ifdef X86
     PREXL8M(ilist, app,
             INSTR_XL8(INSTR_CREATE_cmp(drcontext, ref, pattern), pc));
+#elif defined(ARM)
+    /* We use an inefficient but simple 2-scratch-reg scheme for now.
+     * XXX: if we limit the pattern value to a 1-byte value we can do a direct
+     * cmp in thumb mode via a repeated-4-times immed and avoid scratch2.
+     * XXX: we could try sub;cbnz in an IT block to avoid clobbering the
+     * flags, though cbnz requires r0-r7.
+     * XXX: for ARM, there are no multi-byte immediates, but subX4 is faster
+     * than movw,movt if there's no dead scratch2.
+     */
+    IF_DEBUG(res =)
+        drreg_reserve_register(drcontext, ilist, app, NULL, &scratch);
+    ASSERT(res == DRREG_SUCCESS, "should always find scratch reg");
+    IF_DEBUG(res =)
+        drreg_reserve_register(drcontext, ilist, app, NULL, &scratch2);
+    ASSERT(res == DRREG_SUCCESS, "should always find 2nd scratch reg");
+    /* To handle a predicated memref, because we can't predicate a conditional
+     * branch nor OP_udf, we need an explicit branch to skip the OP_udf if the
+     * app pred doesn't match.  We just skip all the instru and don't predicate.
+     */
+    if (pred != DR_PRED_NONE && pred != DR_PRED_AL) {
+        PRE(ilist, app, INSTR_PRED
+            (XINST_CREATE_jump_short(drcontext, opnd_create_instr(label)),
+             instr_invert_predicate(pred)));
+    }
+    /* ldr scratch, ref */
+    for (i = 0; i < opnd_num_regs_used(ref); i++) {
+        reg_id_t reg = opnd_get_reg_used(ref, i);
+        if (reg != dr_get_stolen_reg()) { /* stolen handled below */
+            IF_DEBUG(res =)
+                drreg_get_app_value(drcontext, ilist, app, reg, reg);
+            ASSERT(res == DRREG_SUCCESS, "should get app value");
+        }
+    }
+    /* XXX DRi#1834: sthg like drx_load_from_app_mem() would make this simpler if
+     * it handled the stolen reg plus pc-relative (and far refs on x86).
+     */
+    if (opnd_uses_reg(ref, dr_get_stolen_reg())) {
+        reg_id_t swap = opnd_uses_reg(ref, scratch) ? scratch2 : scratch;
+        IF_DEBUG(bool ok;)
+        ASSERT(!opnd_uses_reg(ref, swap), "opnd uses 3 different regs?!");
+        IF_DEBUG(ok =)
+            dr_insert_get_stolen_reg_value(drcontext, ilist, app, swap);
+        ASSERT(ok, "failed to handle stolen register");
+        IF_DEBUG(ok =)
+            opnd_replace_reg(&ref, dr_get_stolen_reg(), swap);
+        ASSERT(ok, "failed to replace reg");
+    }
+    if (opnd_get_size(ref) == OPSZ_1) {
+        in = INSTR_CREATE_ldrb(drcontext, opnd_create_reg(scratch), ref);
+    } else if (opnd_get_size(ref) == OPSZ_2) {
+        in = INSTR_CREATE_ldrh(drcontext, opnd_create_reg(scratch), ref);
+    } else {
+        ASSERT(opnd_get_size(ref) == OPSZ_4, "unsupported ARM memref size");
+        in = INSTR_CREATE_ldr(drcontext, opnd_create_reg(scratch), ref);
+    }
+    PREXL8M(ilist, app, INSTR_XL8(in, pc));
+    /* movw+movt pattern to scratch2 */
+    in = INSTR_CREATE_movw(drcontext, opnd_create_reg(scratch2),
+                           OPND_CREATE_INT(val & 0xffff));
+    PREXL8M(ilist, app, INSTR_XL8(in, pc));
+    if (opnd_get_size(ref) == OPSZ_4) {
+        in = INSTR_CREATE_movt(drcontext, opnd_create_reg(scratch2),
+                               OPND_CREATE_INT(val >> 16));
+        PREXL8M(ilist, app, INSTR_XL8(in, pc));
+    }
+    /* cmp scratch to scratch2 */
+    in = INSTR_CREATE_cmp(drcontext, opnd_create_reg(scratch),
+                          opnd_create_reg(scratch2));
+    PREXL8M(ilist, app, INSTR_XL8(in, pc));
+    IF_DEBUG(res =)
+        drreg_unreserve_register(drcontext, ilist, app, scratch2);
+    ASSERT(res == DRREG_SUCCESS, "should always succeed");
+    IF_DEBUG(res =)
+        drreg_unreserve_register(drcontext, ilist, app, scratch);
+    ASSERT(res == DRREG_SUCCESS, "should always succeed");
+#endif
+
     /* jne label */
+    /* XXX: add XINST_CREATE_xxxx cross-platform cbr macro to DR */
+#ifdef X86
     PRE(ilist, app, INSTR_CREATE_jcc_short(drcontext, OP_jne_short,
                                            opnd_create_instr(label)));
-    /* we assume that the pattern seen is rare enough, so we use ud2a to
-     * cause an illegal exception if match.
+#elif defined(ARM)
+    PRE(ilist, app, INSTR_PRED
+        (XINST_CREATE_jump_short(drcontext, opnd_create_instr(label)), DR_PRED_NE));
+#endif
+    /* we assume that the pattern seen is rare enough, so we use ud2a or udf to
+     * cause an illegal exception on a match.
      */
+#ifdef X86
     PREXL8M(ilist, app, INSTR_XL8(INSTR_CREATE_ud2a(drcontext), pc));
+#elif defined(ARM)
+    PREXL8M(ilist, app, INSTR_XL8(INSTR_CREATE_udf(drcontext, OPND_CREATE_INT32(0)), pc));
+#endif
     /* label */
     PRE(ilist, app, label);
 }
@@ -247,18 +346,27 @@ pattern_create_check_opnds(bb_info_t *bi, opnd_t *refs, opnd_t *opnds
     return -1;
 }
 
+/* If not called during drmgr's insert phase, the caller must preserve aflags */
 static void
 pattern_insert_check_code(void *drcontext, instrlist_t *ilist,
                           instr_t *app, opnd_t ref, bb_info_t *bi)
 {
     opnd_t refs[MAX_NUM_CHECKS_PER_REF], opnds[MAX_NUM_CHECKS_PER_REF];
     int num_checks, i;
+    IF_DEBUG(drreg_status_t res);
 
+    if (drmgr_current_bb_phase(drcontext) == DRMGR_PHASE_INSERTION) {
+        IF_DEBUG(res =)
+            drreg_reserve_aflags(drcontext, ilist, app);
+        ASSERT(res == DRREG_SUCCESS, "reserve of aflags should work");
+    }
     ASSERT(opnd_uses_nonignorable_memory(ref),
            "non-memory-ref opnd is instrumented");
+#ifdef X86
     /* special handling for xlat instr */
     if (instr_get_opcode(app) == OP_xlat)
         pattern_handle_xlat(drcontext, ilist, app, true /* pre */);
+#endif
 
     refs[0] = ref;
     num_checks = pattern_create_check_opnds(bi, refs, opnds
@@ -268,46 +376,31 @@ pattern_insert_check_code(void *drcontext, instrlist_t *ilist,
     for (i = 0; i < num_checks; i++)
         pattern_insert_cmp_jne_ud2a(drcontext, ilist, app, refs[i], opnds[i]);
 
+#ifdef X86
     if (instr_get_opcode(app) == OP_xlat)
         pattern_handle_xlat(drcontext, ilist, app, false /* post */);
-}
+#endif
 
-static void
-pattern_insert_aflags_label(void *drcontext, instrlist_t *ilist, instr_t *where,
-                            bool save, bool with_eax)
-
-{
-    instr_t *label = INSTR_CREATE_label(drcontext);
-    ptr_uint_t note = note_base;
-
-    if (save) {
-        if (with_eax)
-            note = note_base + NOTE_SAVE_AFLAGS_WITH_EAX;
-        else
-            note = note_base + NOTE_SAVE_AFLAGS;
-    } else {
-        if (with_eax)
-            note = note_base + NOTE_RESTORE_AFLAGS_WITH_EAX;
-        else
-            note = note_base + NOTE_RESTORE_AFLAGS;
+    if (drmgr_current_bb_phase(drcontext) == DRMGR_PHASE_INSERTION) {
+        IF_DEBUG(res =)
+            drreg_unreserve_aflags(drcontext, ilist, app);
+        ASSERT(res == DRREG_SUCCESS, "unreserve of aflags should work");
     }
-    instr_set_note(label, (void *)note);
-    PRE(ilist, where, label);
 }
 
 static int
-pattern_extract_refs(instr_t *app, bool *use_eax, opnd_t *refs
-                     _IF_DEBUG(int max_num_refs))
+pattern_extract_refs(instr_t *app, opnd_t *refs _IF_DEBUG(int max_num_refs))
 {
     int i, j, num_refs = 0;
     opnd_t opnd;
 
+#ifdef X86
     if (instr_get_opcode(app) == OP_xlat) {
         /* we use (%xbx, %xax) to emulate xlat's (%xbx, %al) */
         refs[0] = opnd_create_base_disp(DR_REG_XBX, DR_REG_XAX, 1, 0, OPSZ_1);
-        *use_eax = true;
         return 1;
     }
+#endif
     /* we do not handle stack access including OP_enter/OP_leave. */
     ASSERT(!options.check_stack_access, "no stack check");
     for (i = 0; i < instr_num_srcs(app); i++) {
@@ -316,8 +409,6 @@ pattern_extract_refs(instr_t *app, bool *use_eax, opnd_t *refs
             ASSERT(num_refs < max_num_refs, "too many refs per instr");
             refs[num_refs] = opnd;
             num_refs++;
-            if (opnd_uses_reg(opnd, DR_REG_XAX))
-                *use_eax = true;
         }
     }
     for (i = 0; i < instr_num_dsts(app); i++) {
@@ -333,8 +424,6 @@ pattern_extract_refs(instr_t *app, bool *use_eax, opnd_t *refs
             ASSERT(num_refs < max_num_refs, "too many refs per instr");
             refs[num_refs] = opnd;
             num_refs++;
-            if (opnd_uses_reg(opnd, DR_REG_XAX))
-                *use_eax = true;
         }
     }
     return num_refs;
@@ -531,13 +620,13 @@ pattern_opt_elide_overlap_update_checks(void *drcontext, bb_info_t *bi,
     return NULL;
 }
 
+/* If not called during drmgr's insert phase, the caller must preserve aflags */
 instr_t *
 pattern_instrument_check(void *drcontext, instrlist_t *ilist, instr_t *app,
                          bb_info_t *bi, bool translating)
 {
     int num_refs, i;
     opnd_t refs[MAX_REFS_PER_INSTR];
-    bool use_eax = false;
     instr_t *label;
     elide_ref_check_info_t *check = NULL;
 
@@ -545,13 +634,12 @@ pattern_instrument_check(void *drcontext, instrlist_t *ilist, instr_t *app,
     if (options.pattern_opt_elide_overlap)
         pattern_opt_elide_overlap_update_regs(app, bi);
 
-    if (instr_get_opcode(app) == OP_lea ||
+    if (IF_X86(instr_get_opcode(app) == OP_lea ||)
         instr_is_prefetch(app) ||
         instr_is_nop(app))
         return NULL;
 
-    num_refs = pattern_extract_refs(app, &use_eax, refs
-                                    _IF_DEBUG(MAX_REFS_PER_INSTR));
+    num_refs = pattern_extract_refs(app, refs _IF_DEBUG(MAX_REFS_PER_INSTR));
     if (num_refs == 0)
         return NULL;
     if (!translating)
@@ -566,12 +654,7 @@ pattern_instrument_check(void *drcontext, instrlist_t *ilist, instr_t *app,
         check = pattern_opt_elide_overlap_update_checks
             (drcontext, bi, ilist, num_refs, refs);
     }
-    mark_eflags_used(drcontext, ilist, bi);
     bi->added_instru = true;
-    if (!whole_bb_spills_enabled()) {
-        /* aflags save label */
-        pattern_insert_aflags_label(drcontext, ilist, app, true, use_eax);
-    }
     /* pattern check code */
     label = INSTR_CREATE_label(drcontext);
     PRE(ilist, app, label);
@@ -586,13 +669,10 @@ pattern_instrument_check(void *drcontext, instrlist_t *ilist, instr_t *app,
             PRE(ilist, app, check->end);
         }
     }
-    if (!whole_bb_spills_enabled()) {
-        /* aflags restore label */
-        pattern_insert_aflags_label(drcontext, ilist, app, false, use_eax);
-    }
     return label;
 }
 
+#ifdef X86
 /* An aggressive optimization to optimize the loop expanded from rep string
  * by introducing an inner loop to avoid the unncessary aflags save/restore.
  * XXX: adding a loop inside bb violates DR's bb constraints:
@@ -651,7 +731,6 @@ pattern_instrument_repstr(void *drcontext, instrlist_t *ilist,
     instr_t *stringop = NULL, *loop = NULL, *post_loop, *instr, *jmp;
     instr_t *check = NULL;
     app_pc next_pc;
-    int live[NUM_LIVENESS_REGS];
 
     ASSERT(bi->is_repstr_to_loop && options.pattern_opt_repstr,
            "should not be here");
@@ -712,8 +791,13 @@ pattern_instrument_repstr(void *drcontext, instrlist_t *ilist,
     post_loop = INSTR_CREATE_label(drcontext);
     instr_set_target(jmp_skip, opnd_create_instr(post_loop));
     /* insert checks */
-    bi->aflags = get_aflags_and_reg_liveness(stringop, live, true);
-    bi->spill_after = instr_get_prev(stringop);
+    /* the pattern checks will suspend their own aflags saves b/c it's not insert phase */
+    /* XXX DRi#511: drmem's own aflags code was superior as it would keep aflags
+     * in eax, vs drreg which today spills aflags to TLS.  We'd want to add a
+     * drreg API for instru2instru that takes in both the save and restore
+     * points at once.
+     */
+    drreg_reserve_aflags(drcontext, ilist, stringop);
     check = pattern_instrument_check
         (drcontext, ilist, stringop, bi, translating);
     ASSERT(check != NULL, "check label must not be NULL");
@@ -725,231 +809,19 @@ pattern_instrument_repstr(void *drcontext, instrlist_t *ilist,
     next_pc = instr_get_app_pc(stringop) +
         instr_length(drcontext, stringop) + 1 /* rep prefix */;
     /* restore aflags before post_loop if necessary */
-    restore_aflags_if_live(drcontext, ilist, post_loop, NULL, bi);
+    drreg_unreserve_aflags(drcontext, ilist, post_loop);
     /* jmp next_pc */
     jmp = INSTR_XL8(INSTR_CREATE_jmp(drcontext, opnd_create_pc(next_pc)),
                     instr_get_app_pc(loop));
     PREXL8(ilist, NULL, jmp);
 }
+#endif /* X86 */
 
-/* Update the arith flag's liveness in a backward scan. */
-static int
-pattern_aflags_liveness_update_on_reverse_scan(instr_t *instr, int liveness)
-{
-    uint flags;
-    if (instr_is_cti(instr))
-        return LIVE_LIVE;
-    if (instr_is_interrupt(instr) || instr_is_syscall(instr))
-        return LIVE_LIVE;
-    flags = instr_get_arith_flags(instr, DR_QUERY_DEFAULT);
-    if (TESTANY(EFLAGS_READ_6, flags))
-        return LIVE_LIVE;
-    if (TESTALL(EFLAGS_WRITE_6, flags))
-        return LIVE_DEAD;
-    /* XXX: we can also track whether OF is live, to avoid seto/add
-     * in aflags save/restore.
-     * We need refactor the existing code for easier reuse.
-     */
-    return liveness;
-}
-
-/* Update the reg's liveness in a backward scan */
-static int
-pattern_reg_liveness_update_on_reverse_scan(instr_t *instr, reg_id_t reg,
-                                            int liveness)
-{
-    if (instr_is_cti(instr))
-        return LIVE_LIVE;
-    if (instr_is_interrupt(instr) || instr_is_syscall(instr))
-        return LIVE_LIVE;
-    if (instr_reads_from_reg(instr, reg, DR_QUERY_DEFAULT))
-        return LIVE_LIVE;
-    if (instr_writes_to_exact_reg(instr, reg, DR_QUERY_DEFAULT))
-        return LIVE_DEAD;
-    return liveness;
-}
-
-static instr_t *
-pattern_find_aflags_save_label(instr_t *restore, ptr_uint_t note_restore,
-                               ptr_uint_t *note_save)
-{
-    ptr_uint_t note;
-    instr_t *save;
-    for (save  = instr_get_prev(restore);
-         save != NULL;
-         save  = instr_get_prev(save)) {
-        if (!instr_is_label(save))
-            continue;
-        note = (ptr_uint_t)instr_get_note(save);
-        if (note != (note_base + NOTE_SAVE_AFLAGS) &&
-            note != (note_base + NOTE_SAVE_AFLAGS_WITH_EAX))
-            continue;
-        ASSERT((note         == (note_base + NOTE_SAVE_AFLAGS) &&
-                note_restore == (note_base + NOTE_RESTORE_AFLAGS)) ||
-               (note         == (note_base + NOTE_SAVE_AFLAGS_WITH_EAX) &&
-                note_restore == (note_base + NOTE_RESTORE_AFLAGS_WITH_EAX)),
-               "Mis-match on eax save/restore");
-        *note_save = note;
-        return save;
-    }
-    return NULL;
-}
-
-/* remove aflags save/restore pair if aflags is dead,
- * returns the prev instr of the aflag save label instr.
- */
-static instr_t *
-pattern_remove_aflags_pair(void *drcontext, instrlist_t *ilist,
-                           instr_t *restore, ptr_uint_t note_restore)
-{
-    instr_t *save, *prev;
-    ptr_uint_t note_save;
-    save = pattern_find_aflags_save_label(restore, note_restore, &note_save);
-    ASSERT(save != NULL, "Mis-match on aflags save/restore");
-    prev = instr_get_prev(save);
-    instrlist_remove(ilist, restore);
-    instr_destroy(drcontext, restore);
-    instrlist_remove(ilist, save);
-    instr_destroy(drcontext, save);
-    return prev;
-}
-
-/* XXX: we should use the utility code in fastpath instead,
- * which requires scratch_reg_info to be constructed.
- */
-static void
-pattern_insert_save_aflags(void *drcontext, instrlist_t *ilist, instr_t *save,
-                           bool save_app_xax, bool restore_app_xax)
-{
-    IF_DEBUG(ptr_uint_t note = (ptr_uint_t)instr_get_note(save);)
-    ASSERT(note != 0 && instr_is_label(save), "wrong aflags save label");
-    if (save_app_xax) {
-        /* save app xax */
-        spill_reg(drcontext, ilist, save, DR_REG_XAX, PATTERN_SLOT_XAX);
-    }
-    /* save aflags,
-     * XXX: we can track oflag usage to avoid saving oflag for some cases.
-     */
-    insert_save_aflags_nospill(drcontext, ilist, save, true /* save oflag */);
-
-    PRE(ilist, save, INSTR_CREATE_lahf(drcontext));
-    PRE(ilist, save,
-        INSTR_CREATE_setcc(drcontext, OP_seto,
-                           opnd_create_reg(DR_REG_AL)));
-    if (restore_app_xax) {
-        /* FIXME: this needs to store where it's keeping things, for
-         * event_restore_state()
-         */
-        /* save aflags into tls slot */
-        spill_reg(drcontext, ilist, save, DR_REG_XAX, PATTERN_SLOT_AFLAGS);
-        /* restore app xax */
-        restore_reg(drcontext, ilist, save, DR_REG_XAX, PATTERN_SLOT_XAX);
-    }
-}
-
-/* XXX: we should use the utility code in fastpath instead,
- * which requires scratch_reg_info to be constructed.
- */
-static void
-pattern_insert_restore_aflags(void *drcontext, instrlist_t *ilist,
-                              instr_t *restore,
-                              bool load_aflags, bool restore_app_xax)
-{
-    IF_DEBUG(ptr_uint_t note = (ptr_uint_t)instr_get_note(restore);)
-    ASSERT(note != 0 && instr_is_label(restore), "wrong aflags restore label");
-    if (load_aflags) {
-        /* restore aflags from tls slot to xax */
-        restore_reg(drcontext, ilist, restore, DR_REG_XAX, PATTERN_SLOT_AFLAGS);
-    }
-    /* restore aflags
-     * XXX: we can track oflag usage to avoid restsoring oflag for some cases.
-     */
-    insert_restore_aflags_nospill(drcontext, ilist, restore, true);
-    if (restore_app_xax) {
-        /* restore app xax */
-        restore_reg(drcontext, ilist, restore, DR_REG_XAX, PATTERN_SLOT_XAX);
-    }
-}
-
-/* insert the aflags save/restore pair, return the prev instr of aflags save */
-static instr_t *
-pattern_insert_aflags_pair(void *drcontext, instrlist_t *ilist,
-                           instr_t *restore,
-                           ptr_uint_t note_restore, int eax_live)
-{
-    instr_t *save, *prev;
-    ptr_uint_t note_save = (note_base + NOTE_NULL);
-    save = pattern_find_aflags_save_label(restore, note_restore, &note_save);
-    ASSERT(save != NULL, "Mis-match on aflags save/restore");
-    prev = instr_get_prev(save);
-    pattern_insert_save_aflags(drcontext, ilist, save, eax_live != LIVE_DEAD,
-                               note_save == (note_base + NOTE_SAVE_AFLAGS_WITH_EAX));
-    pattern_insert_restore_aflags(drcontext, ilist, restore,
-                                  note_restore == (note_base +
-                                                   NOTE_RESTORE_AFLAGS_WITH_EAX),
-                                  eax_live != LIVE_DEAD);
-    instrlist_remove(ilist, restore);
-    instr_destroy(drcontext, restore);
-    instrlist_remove(ilist, save);
-    instr_destroy(drcontext, save);
-    return prev;
-}
-
-/* reverse scan for aflags save/restore instrumentation and other optimization.
- * To minimize the runtime overhead, we perform the reverse scan to update the
- * register and aflag's liveness. In forward scan, the instruction list has to be
- * traversed multiple passes for liveness analysis.
- * XXX: we might have to let reverse scan pass go away w/ drmgr, which supports
- * forward per-instr instrumentation only.
- */
-void
-pattern_instrument_reverse_scan(void *drcontext, instrlist_t *ilist)
-{
-    instr_t *instr, *prev;
-    ptr_uint_t note;
-    int eax_live    = LIVE_LIVE;
-    int aflags_live = LIVE_LIVE;
-
-    for (instr  = instrlist_last(ilist);
-         instr != NULL;
-         instr  = prev) {
-        prev = instr_get_prev(instr);
-        if (instr_is_app(instr)) {
-            eax_live = pattern_reg_liveness_update_on_reverse_scan
-                (instr, DR_REG_XAX, eax_live);
-            aflags_live = pattern_aflags_liveness_update_on_reverse_scan
-                (instr, aflags_live);
-        }
-        if (!instr_is_label(instr))
-            continue;
-        note = (ptr_uint_t)instr_get_note(instr);
-        if (note == (note_base + NOTE_NULL))
-            continue;
-        /* XXX: i#776
-         * instead of blindly insert aflags save and restore, we
-         * have some possible optimizations:
-         * 1. DONE: only save/restore aflags when necessary
-         * 2. DONE: only save/restore eax when necessary
-         * 3. TODO: fine tune the aflags liveness, i.e. overflow flags
-         * 3. TODO: group aflags save/restore if aflags and eax not touched
-         *    (can be relaxed later)
-         */
-        if (note == (note_base + NOTE_RESTORE_AFLAGS) ||
-            note == (note_base + NOTE_RESTORE_AFLAGS_WITH_EAX)) {
-            if (aflags_live == LIVE_DEAD) {
-                /* aflags is dead, we do not need to save them, remove  */
-                prev = pattern_remove_aflags_pair(drcontext, ilist, instr, note);
-            } else {
-                prev = pattern_insert_aflags_pair(drcontext, ilist, instr, note,
-                                                  eax_live);
-            }
-        }
-    }
-}
-
+/* Assumes the caller has set the ISA mode to match the fault point */
 static bool
-pattern_ill_instr_is_instrumented(byte *pc)
+pattern_ill_instr_is_instrumented(void *drcontext, byte *pc)
 {
+#ifdef X86
     byte buf[6];
     /* check if our code sequence */
     if (!safe_read(pc - JNZ_SHORT_LENGTH - 2 /* 2 bytes of cmp immed value */,
@@ -960,6 +832,62 @@ pattern_ill_instr_is_instrumented(byte *pc)
          (*(ushort *)&buf[0] != (ushort)pattern_reverse)) ||
         (*(ushort *)&buf[4] != (ushort)UD2A_OPCODE))
         return false;
+#elif defined(ARM)
+    /* For Thumb:
+     *  +30   m4 @0x4f7d2008  f8d3 c004  ldr    +0x04(%r3)[4byte] -> %r12
+     *  +34   m4 @0x4f7d1f70  f24f 14fd  movw   $0x0000f1fd -> %r4
+     *  +38   m4 @0x4f7d1f24  f2cf 14fd  movt   $0x0000f1fd -> %r4
+     *  +42   m4 @0x4f7d1ee4  ebbc 0f04  cmp    %r12 %r4  $0x00
+     *  +46   m4 @0x537a1ea4  d100       b.ne   @0x537a20a0[4byte]
+     *  +48   m4 @0x537a1bb0  de00       udf    $0x00000000
+     *  +50   m4 @0x537a20a0             <label>
+     * When the app memref is predicated, we add a b.!pred at the top, so the
+     * rest does not change.
+     * For ARM:
+     *  +20   m4 @0x4f3fe0f4  e5901000   ldr    (%r0)[4byte] -> %r1
+     *  +24   m4 @0x4f3fe180  e30f21fd   movw   $0x0000f1fd -> %r2
+     *  +28   m4 @0x4f3fdee8  e34f21fd   movt   $0x0000f1fd -> %r2
+     *  +32   m4 @0x4f3fdf28  e1510002   cmp    %r1 %r2  $0x00
+     *  +36   m4 @0x4f3fdf68  1a000000   b.ne   @0x4f3fdc34[4byte]
+     *  +40   m4 @0x4f3fdb50  e7f000f0   udf    $0x00000000
+     *  +44   m4 @0x4f3fdc34             <label>
+     * For 2-byte or 1-byte memrefs, there is no movt.
+     */
+    if (dr_get_isa_mode(drcontext) == DR_ISA_ARM_THUMB) {
+        byte buf[12]; /* 12 bytes from movt (or movw for <4byte) through udf */
+#       define BNE_THUMB_OPCODE 0xd100
+        int immed;
+        if (!safe_read(pc + UDF_THUMB_LENGTH - sizeof(buf), sizeof(buf), buf))
+            return false;
+        immed = ((buf[0] & 0xf) << 12) | ((buf[1] & 0x4) << 9) |
+            ((buf[3] & 0x70) << 4) | buf[2];
+        DOLOG(3, {
+            int i;
+            LOG(3, "%s: read ", __FUNCTION__);
+            for (i = 0; i < sizeof(buf); i++)
+                LOG(3, " %02x", buf[i]);
+            LOG(3, "\n\timmed=0x%x, bne=0x%x, udf=0x%x\n", immed,
+                *(ushort *)&buf[8], *(ushort *)&buf[10]);
+        });
+        if ((immed != (options.pattern & 0xffff) &&
+             immed != (pattern_reverse & 0xffff)) ||
+            *(ushort *)&buf[8] != (ushort)BNE_THUMB_OPCODE ||
+            *(ushort *)&buf[10] != (ushort)UDF_THUMB_OPCODE)
+            return false;
+    } else {
+        byte buf[16]; /* 16 bytes from movt (or movw for <4byte) through udf */
+#       define BNE_ARM_OPCODE 0x1a000000
+        int immed;
+        if (!safe_read(pc + UDF_ARM_LENGTH - sizeof(buf), sizeof(buf), buf))
+            return false;
+        immed = ((buf[2] & 0xf) << 12) | ((buf[1] & 0xf) << 8) | buf[0];
+        if ((immed != (options.pattern & 0xffff) &&
+             immed != (pattern_reverse & 0xffff)) ||
+            *(ushort *)&buf[8] != (ushort)BNE_ARM_OPCODE ||
+            *(ushort *)&buf[12] != (ushort)UDF_ARM_OPCODE)
+            return false;
+    }
+#endif
     return true;
 }
 
@@ -987,12 +915,20 @@ pattern_handle_ill_fault(void *drcontext,
     bool   is_write;
     int    memopidx;
     instr_t instr;
-    uint   pos;
+    uint   pos, skip;
     ASSERT(options.pattern != 0, "incorrectly called");
     STATS_INC(num_slowpath_faults);
+#ifdef ARM
+    dr_isa_mode_t old_mode;
+    dr_isa_mode_t fault_mode = get_isa_mode_from_fault_mc(raw_mc);
+    dr_set_isa_mode(drcontext, fault_mode, &old_mode);
+#endif
+
     /* check if ill-instr is our code */
-    if (!pattern_ill_instr_is_instrumented(raw_mc->pc))
+    if (!pattern_ill_instr_is_instrumented(drcontext, raw_mc->pc)) {
+        IF_ARM(dr_set_isa_mode(drcontext, old_mode, NULL));
         return false;
+    }
     /* get the information of the instr that triggered the ill fault.
      * will report on all unaddr refs in this instr and don't care
      * which one triggered the ud2a
@@ -1004,7 +940,7 @@ pattern_handle_ill_fault(void *drcontext,
                                       &addr, &is_write, &pos);
          memopidx++) {
         app_loc_t loc;
-        size_t size = 0;
+        size_t size;
         opnd_t opnd = is_write ?
             instr_get_dst(&instr, pos) : instr_get_src(&instr, pos);
         if (!opnd_uses_nonignorable_memory(opnd))
@@ -1021,22 +957,27 @@ pattern_handle_ill_fault(void *drcontext,
     /* we are not skipping all cmps for this instr, which is ok because we
      * clobberred the pattern if a 2nd memref was unaddr.
      */
+    skip = IF_ARM_ELSE(fault_mode == DR_ISA_ARM_THUMB ?
+                       UDF_THUMB_LENGTH : UDF_ARM_LENGTH, UD2A_LENGTH);
     LOG(2, "pattern check ud2a triggered@"PFX" => skip to "PFX"\n",
-        raw_mc->pc, raw_mc->pc + UD2A_LENGTH);
-    raw_mc->pc += UD2A_LENGTH;
+        raw_mc->pc, raw_mc->pc + skip);
+    raw_mc->pc += skip;
 
     if (options.pattern_max_2byte_faults > 0 &&
         num_2byte_faults >= options.pattern_max_2byte_faults) {
         /* 2-byte checks caused too many faults, switch instrumentation style */
         pattern_switch_instrumentation_style();
     }
+    IF_ARM(dr_set_isa_mode(drcontext, old_mode, NULL));
     return true;
 }
 
+/* Assumes the caller has set the ISA mode to match the fault point */
 static bool
 pattern_segv_instr_is_instrumented(byte *pc, byte *next_next_pc,
                                    instr_t *inst, instr_t *next)
 {
+#ifdef X86
     ushort ud2a;
     /* check code sequence: cmp; jne_short; ud2a */
     if (instr_get_opcode(inst) == OP_cmp &&
@@ -1060,6 +1001,19 @@ pattern_segv_instr_is_instrumented(byte *pc, byte *next_next_pc,
         });
         return true;
     }
+#elif defined(ARM)
+    /* check code sequence: ldr; movw+movt; cmp; b.ne; udf */
+    if ((instr_get_opcode(inst) == OP_ldr ||
+         instr_get_opcode(inst) == OP_ldrb ||
+         instr_get_opcode(inst) == OP_ldrh) &&
+        instr_get_opcode(next) == OP_movw &&
+        opnd_is_immed_int(instr_get_src(next, 0))) {
+        uint imm = opnd_get_immed_int(instr_get_src(next, 0));
+        if (imm == (ushort)options.pattern ||
+            imm == (ushort)pattern_reverse)
+            return true;
+    }
+#endif
     return false;
 }
 
@@ -1079,13 +1033,19 @@ pattern_segv_instr_is_instrumented(byte *pc, byte *next_next_pc,
  * by us.
  */
 bool
-pattern_handle_segv_fault(void *drcontext, dr_mcontext_t *raw_mc
+pattern_handle_segv_fault(void *drcontext, dr_mcontext_t *raw_mc,
+                          dr_mcontext_t *mc
                           _IF_WINDOWS(app_pc target)
                           _IF_WINDOWS(bool guard))
 {
     bool ours = false;
     instr_t inst, next;
     byte *next_pc;
+#ifdef ARM
+    dr_isa_mode_t old_mode;
+    dr_isa_mode_t fault_mode = get_isa_mode_from_fault_mc(raw_mc);
+    dr_set_isa_mode(drcontext, fault_mode, &old_mode);
+#endif
 
     /* check if wrong pc */
     instr_init(drcontext, &inst);
@@ -1095,8 +1055,44 @@ pattern_handle_segv_fault(void *drcontext, dr_mcontext_t *raw_mc
     if (!safe_decode(drcontext, next_pc, &next, &next_pc))
         goto handle_light_mode_segv_fault_done;
     /* check if our own code */
-    if (!pattern_segv_instr_is_instrumented(raw_mc->pc, next_pc, &inst, &next))
+    if (!pattern_segv_instr_is_instrumented(raw_mc->pc, next_pc, &inst, &next)) {
+        app_pc addr;
+        bool is_write;
+        uint pos;
+        int  memopidx;
+        app_loc_t loc;
+        size_t size;
+        opnd_t opnd;
+        dr_mem_info_t info;
+        for (memopidx = 0;
+             instr_compute_address_ex_pos(&inst, mc, memopidx,
+                                          &addr, &is_write, &pos);
+             memopidx++) {
+            if (dr_query_memory_ex(addr, &info)) {
+                if (info.type == DR_MEMTYPE_FREE) {
+                    opnd = is_write ?
+                        instr_get_dst(&inst, pos) : instr_get_src(&inst, pos);
+                    size = opnd_size_in_bytes(opnd_get_size(opnd));
+                    pc_to_loc(&loc, mc->pc);
+                    report_unaddressable_access(&loc, addr, size,
+                                                is_write ? DR_MEMPROT_WRITE :
+                                                DR_MEMPROT_READ,
+                                                addr, addr + size, mc);
+                } else if (is_write && options.report_write_to_read_only &&
+                           !TEST(DR_MEMPROT_WRITE, info.prot)) {
+                    if (IF_WINDOWS(guard ||) TEST(info.prot, DR_MEMPROT_PRETEND_WRITE))
+                        continue;
+                    opnd = instr_get_dst(&inst, pos);
+                    size = opnd_size_in_bytes(opnd_get_size(opnd));
+                    pc_to_loc(&loc, mc->pc);
+                    report_unaddr_warning(&loc, mc, "writing to readonly memory",
+                                          addr, size, true);
+                }
+                /* FIXME i#1015: report unaddr error for write on read-only */
+            }
+        }
         goto handle_light_mode_segv_fault_done;
+    }
 #ifdef WINDOWS
     if (guard) {
         /* violation caused by us, restore the guard page.
@@ -1125,11 +1121,34 @@ pattern_handle_segv_fault(void *drcontext, dr_mcontext_t *raw_mc
     }
 #endif
     /* skip pattern check code */
+#ifdef X86
     LOG(2, "pattern check cmp fault@"PFX" => skip to "PFX"\n",
         raw_mc->pc, next_pc + UD2A_LENGTH);
     raw_mc->pc = next_pc + UD2A_LENGTH;
+#elif defined(ARM)
+    instr_reset(drcontext, &next);
+    if (!safe_decode(drcontext, next_pc, &next, &next_pc))
+        goto handle_light_mode_segv_fault_done;
+    if (instr_get_opcode(&next) == OP_movt) {
+        instr_reset(drcontext, &next);
+        if (!safe_decode(drcontext, next_pc, &next, &next_pc))
+            goto handle_light_mode_segv_fault_done;
+    }
+    ASSERT(instr_get_opcode(&next) == OP_cmp, "invalid pattern instru");
+    instr_reset(drcontext, &next);
+    if (!safe_decode(drcontext, next_pc, &next, &next_pc))
+        goto handle_light_mode_segv_fault_done;
+    ASSERT(instr_is_cbr(&next), "invalid pattern instru");
+    instr_reset(drcontext, &next);
+    if (!safe_decode(drcontext, next_pc, &next, &next_pc))
+        goto handle_light_mode_segv_fault_done;
+    ASSERT(instr_get_opcode(&next) == OP_udf, "invalid pattern instru");
+    LOG(2, "pattern check fault@"PFX" => skip to "PFX"\n", raw_mc->pc, next_pc);
+    raw_mc->pc = next_pc;
+#endif
     ours = true;
   handle_light_mode_segv_fault_done:
+    IF_ARM(dr_set_isa_mode(drcontext, old_mode, NULL));
     instr_free(drcontext, &inst);
     instr_free(drcontext, &next);
     return ours;
@@ -1477,7 +1496,8 @@ pattern_handle_mem_ref(app_loc_t *loc, byte *addr, size_t size,
          */
         if (!check_unaddressable_exceptions(is_write, loc, addr, size,
                                             false, mc)) {
-            report_unaddressable_access(loc, addr, size, is_write,
+            report_unaddressable_access(loc, addr, size,
+                                        is_write ? DR_MEMPROT_WRITE : DR_MEMPROT_READ,
                                         addr, addr + size, mc);
         }
         /* clobber the pattern to avoid duplicate reports for this same addr
@@ -1512,8 +1532,6 @@ pattern_init(void)
         pattern_malloc_tree = rb_tree_create(NULL);
         pattern_malloc_tree_rwlock = dr_rwlock_create();
     }
-    note_base = drmgr_reserve_note_range(NOTE_MAX_VALUE);
-    ASSERT(note_base != DRMGR_NOTE_NONE, "failed to get note value");
 
     /* reverse the byte order for unaligned checks:
      * for example, if the pattern is 0x43214321, the reversed pattern is

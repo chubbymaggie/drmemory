@@ -25,13 +25,15 @@
 #include "utils.h"
 #include "shadow.h"
 #include "umbra.h"
+#include "spill.h"
+#include "instru.h"
 #include <limits.h> /* UINT_MAX */
 #include <stddef.h>
 #ifdef TOOL_DR_HEAPSTAT
 # include "../drheapstat/staleness.h"
 #endif
 
-#include "readwrite.h" /* get_own_seg_base */
+#include "slowpath.h" /* get_own_seg_base */
 
 #ifdef TOOL_DR_MEMORY /* around whole shadow table */
 
@@ -153,6 +155,20 @@ umbra_map_t *umbra_map;
 #define SHADOW_REDZONE_VALUE SHADOW_DWORD_BITLEVEL
 #define SHADOW_REDZONE_VALUE_SIZE 1
 #define REDZONE_SIZE 512
+
+typedef struct _saved_region_t {
+    app_pc start;
+    size_t size;
+    bitmap_t shadow;
+} saved_region_t;
+
+/* extend size to uint boundary if the exact required size is not already aligned */
+#define SIZEOF_SAVED_BUFFER_SHADOW(size) \
+    (ALIGN_FORWARD((size), SHADOW_GRANULARITY) / SHADOW_GRANULARITY)
+
+/* single allocation for saved_region_t and its shadow buffer */
+#define SIZEOF_SAVED_BUFFER(size) \
+    (sizeof(saved_region_t) + SIZEOF_SAVED_BUFFER_SHADOW(size))
 
 #ifndef X64
 static byte *special_unaddressable;
@@ -482,6 +498,58 @@ shadow_replace_special(app_pc addr)
     return shadow_addr;
 }
 
+/* Saves the shadow values for the specified app memory region into a newly allocated
+ * buffer. The caller must free the returned shadow buffer using shadow_free_buffer(),
+ */
+shadow_buffer_t *
+shadow_save_region(app_pc start, size_t size)
+{
+    uint i, shadow_value;
+    size_t saved_buffer_size = SIZEOF_SAVED_BUFFER(size);
+    saved_region_t *saved = global_alloc(saved_buffer_size, HEAPSTAT_SHADOW);
+    umbra_shadow_memory_info_t shadow_info;
+
+    if (MAP_4B_TO_1B) {
+        ASSERT_NOT_IMPLEMENTED();
+        return NULL;
+    }
+
+    /* single allocation: struct at the front, buffer at the back */
+    saved->start = start;
+    saved->size = size;
+    saved->shadow = (bitmap_t)((byte *) saved + sizeof(saved_region_t));
+
+    /* XXX i#1734: this can be optimized for better performance on large buffers */
+    umbra_shadow_memory_info_init(&shadow_info);
+    for (i = 0; i < saved->size; i++) {
+        shadow_value = shadow_get_byte(&shadow_info, (byte *) start + i);
+        bitmapx2_set(saved->shadow, i, shadow_value);
+    }
+    return (shadow_buffer_t *) saved;
+}
+
+/* Restore the shadow state for a region that was saved using shadow_save_buffer(). */
+void
+shadow_restore_region(shadow_buffer_t *shadow_buffer)
+{
+    uint i;
+    saved_region_t *saved = (saved_region_t *) shadow_buffer;
+    umbra_shadow_memory_info_t shadow_info;
+
+    umbra_shadow_memory_info_init(&shadow_info);
+    for (i = 0; i < saved->size; i++)
+        shadow_set_byte(&shadow_info, saved->start + i, bitmapx2_get(saved->shadow, i));
+}
+
+/* Free a shadow buffer that was allocated in shadow_save_buffer(). */
+void
+shadow_free_buffer(shadow_buffer_t *shadow_buffer)
+{
+    saved_region_t *saved = (saved_region_t *) shadow_buffer;
+
+    global_free(saved, SIZEOF_SAVED_BUFFER(saved->size), HEAPSTAT_SHADOW);
+}
+
 /* Sets the two bits for each byte in the range [start, end) */
 void
 shadow_set_range(app_pc start, app_pc end, uint val)
@@ -767,7 +835,7 @@ shadow_next_dword(app_pc start, app_pc end, uint expect)
                                      end - app_addr,
                                      expect_dword, 1,
                                      &found) != DRMF_SUCCESS)
-        ASSERT(false, "fail to check value in shadow mmeory");
+        ASSERT(false, "failed to check value in shadow memory");
     if (found)
         return app_addr;
     return NULL;
@@ -830,7 +898,7 @@ shadow_next_ptrsz(app_pc start, app_pc end, uint expect)
                                      end - app_addr,
                                      expect_val, sizeof(void*)/SHADOW_GRANULARITY,
                                      &found) != DRMF_SUCCESS)
-        ASSERT(false, "fail to check value in shadow mmeory");
+        ASSERT(false, "failed to check value in shadow memory");
     if (found)
         return app_addr;
     return NULL;
@@ -1447,7 +1515,7 @@ opnd_create_shadow_reg_slot(reg_id_t reg)
     ASSERT(options.shadowing, "incorrectly called");
     if (reg_is_gpr(reg)) {
         reg_id_t r = reg_to_pointer_sized(reg);
-        offs = (r - DR_REG_XAX) * IF_X64_ELSE(2, 1);
+        offs = (r - DR_REG_START_GPR) * IF_X64_ELSE(2, 1);
         opsz = IF_X64_ELSE(OPSZ_2, OPSZ_1);
     } else {
         ASSERT(reg_is_xmm(reg) || reg_is_mmx(reg), "internal shadow reg error");
@@ -1464,6 +1532,7 @@ opnd_create_shadow_reg_slot(reg_id_t reg)
 uint
 get_shadow_xmm_offs(reg_id_t reg)
 {
+#ifdef X86
     if (reg_is_ymm(reg))
         return offsetof(shadow_aux_registers_t, ymmh) + sizeof(int)*(reg - DR_REG_YMM0);
     if (reg_is_xmm(reg))
@@ -1472,6 +1541,11 @@ get_shadow_xmm_offs(reg_id_t reg)
         ASSERT(reg_is_mmx(reg), "invalid reg");
         return offsetof(shadow_aux_registers_t, mm) + sizeof(short)*(reg - DR_REG_MM0);
     }
+#else
+    /* FIXME i#1726: port to ARM: shadow SIMD regs */
+    ASSERT_NOT_IMPLEMENTED();
+    return 0;
+#endif
 }
 
 opnd_t
@@ -1527,7 +1601,11 @@ shadow_registers_thread_init(void *drcontext)
 #endif
 #ifdef TOOL_DR_MEMORY
     aux = thread_alloc(drcontext, sizeof(*sr->aux), HEAPSTAT_SHADOW);
-    if (first_thread) {
+    if (first_thread ||
+        /* If the app created other threads early before DR took over, we
+         * have to treat everything as defined.
+         */
+        !first_bb) {
         first_thread = false;
         /* since we're in late, we consider everything defined
          * (if we were in at init APC, only stack pointer would be defined) */
@@ -1585,7 +1663,9 @@ shadow_registers_init(void)
     ASSERT(tls_idx_shadow > -1, "failed to reserve TLS slot");
     LOG(2, "TLS shadow base: "PIFX"\n", tls_shadow_base);
     ASSERT(ok, "fatal error: unable to reserve tls slots");
+#ifdef X86
     ASSERT(tls_shadow_seg == EXPECTED_SEG_TLS, "unexpected tls segment");
+#endif
 }
 
 static void
@@ -1639,8 +1719,9 @@ reg_shadow_addr(shadow_registers_t *sr, reg_id_t reg)
     if (reg == REG_NULL)
         return ((byte *)sr) + offsetof(shadow_registers_t, eflags);
     else if (reg_is_gpr(reg))
-        return ((byte *)sr) + (reg_to_pointer_sized(reg) - DR_REG_XAX);
+        return ((byte *)sr) + (reg_to_pointer_sized(reg) - DR_REG_START_GPR);
     else {
+#ifdef X86
         /* Caller must ask for xmm to get low bits (won't all fit in uint) */
         if (reg_is_ymm(reg))
             return (byte *) &sr->aux->ymmh[reg - DR_REG_YMM0];
@@ -1650,6 +1731,11 @@ reg_shadow_addr(shadow_registers_t *sr, reg_id_t reg)
             ASSERT(reg_is_mmx(reg), "invalid reg");
             return (byte *) &sr->aux->mm[reg - DR_REG_MM0];
         }
+#else
+        /* FIXME i#1726: port to ARM: shadow SIMD regs */
+        ASSERT_NOT_IMPLEMENTED();
+        return NULL;
+#endif
     }
 }
 

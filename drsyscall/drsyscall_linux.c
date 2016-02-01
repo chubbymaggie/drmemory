@@ -29,7 +29,9 @@
 #include <string.h> /* for strcmp */
 #include <stddef.h> /* for offsetof */
 #include "linux_defines.h"
-#include <asm/prctl.h>
+#ifdef X86
+# include <asm/prctl.h>
+#endif
 #include <sys/prctl.h>
 
 /* used to read entire ioctl arg at once */
@@ -67,12 +69,21 @@ union ioctl_data {
  */
 /* PACKNUM is defined in table_defines.h */
 /* the cast is for sign extension for -1 sentinel */
-#define UNPACK_X64(packed) ((int)(short)((packed) >> 16))
-#define UNPACK_X86(packed) ((int)(short)((packed) & 0xffff))
-#ifdef X64
-# define UNPACK_NATIVE UNPACK_X64
-#else
-# define UNPACK_NATIVE UNPACK_X86
+#ifdef X86
+# define UNPACK_X64(packed) ((int)(short)((packed) >> 16))
+# define UNPACK_X86(packed) ((int)(short)((packed) & 0xffff))
+# ifdef X64
+#  define UNPACK_NATIVE UNPACK_X64
+# else
+#  define UNPACK_NATIVE UNPACK_X86
+# endif
+#elif defined(ARM)
+/* single number as we only support 32-bit for now */
+# ifdef X64
+#  error NYI i#1569
+# else
+#  define UNPACK_NATIVE(packed) packed
+# endif
 #endif
 
 /* Table that maps system call number to a syscall_info_t* */
@@ -195,12 +206,14 @@ sysparam_reg(uint argnum)
     }
 #else
     switch (argnum) {
-    case 0: return REG_EBX;
-    case 1: return REG_ECX;
-    case 2: return REG_EDX;
-    case 3: return REG_ESI;
-    case 4: return REG_EDI;
-    case 5: return REG_EBP; /* for vsyscall, value is instead on stack */
+    case 0: return IF_ARM_ELSE(DR_REG_R0, DR_REG_EBX);
+    case 1: return IF_ARM_ELSE(DR_REG_R1, DR_REG_ECX);
+    case 2: return IF_ARM_ELSE(DR_REG_R2, DR_REG_EDX);
+    case 3: return IF_ARM_ELSE(DR_REG_R3, DR_REG_ESI);
+    case 4: return IF_ARM_ELSE(DR_REG_R4, DR_REG_EDI);
+    case 5:
+        /* for vsyscall, value is instead on stack */
+        return IF_ARM_ELSE(DR_REG_R5, DR_REG_EBP);
     default:
         ASSERT(false, "invalid syscall argnum");
     }
@@ -218,7 +231,8 @@ drsyscall_os_get_sysparam_location(cls_syscall_t *pt, uint argnum, drsys_arg_t *
     /* DR's syscall events don't tell us if this was vsyscall so we compare
      * values to find out
      */
-    if (reg == REG_EBP && reg_get_value(reg, arg->mc) != pt->sysarg[argnum]) {
+    if (IF_X86_ELSE(reg == DR_REG_EBP &&
+                    reg_get_value(reg, arg->mc) != pt->sysarg[argnum], false)) {
         /* must be vsyscall */
         ASSERT(!is_using_sysint(), "vsyscall incorrect assumption");
         arg->reg = DR_REG_NULL;
@@ -263,20 +277,24 @@ handle_clone(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *ii)
         }
     }
     if (TEST(CLONE_SETTLS, flags)) {
+#ifdef X86_32
         /* handle differences in type name */
-#ifdef _LINUX_LDT_H
+# ifdef _LINUX_LDT_H
         typedef struct modify_ldt_ldt_s user_desc_t;
-#else
+# else
         typedef struct user_desc user_desc_t;
-#endif
+# endif
         user_desc_t *tls = SYSARG_AS_PTR(pt, 3, user_desc_t *);
+#endif
         if (!report_sysarg(ii, 3, SYSARG_READ))
             return;
+#ifdef X86_32 /* for X64 or for ARM, inlined value */
         if (tls != NULL) {
             if (!report_memarg_type(ii, 3, SYSARG_READ, (app_pc) tls, sizeof(*tls), NULL,
                                     DRSYS_TYPE_STRUCT, NULL))
                 return;
         }
+#endif
     }
     if (TESTANY(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID, flags)) {
         /* Even though CLEARTID is not used until child exit, and the address
@@ -1947,8 +1965,8 @@ os_handle_post_syscall_arg_access(sysarg_iter_info_t *ii,
 bool
 os_syscall_succeeded(drsys_sysnum_t sysnum, syscall_info_t *info, cls_syscall_t *pt)
 {
-    ptr_int_t res = (ptr_int_t) pt->mc.xax;
-    if (sysnum.number == SYS_mmap || IF_X86_32(sysnum.number == SYS_mmap2 ||)
+    ptr_int_t res = (ptr_int_t) pt->mc.IF_ARM_ELSE(r0,xax);
+    if (sysnum.number == SYS_mmap || IF_NOT_X64(sysnum.number == SYS_mmap2 ||)
         sysnum.number == SYS_mremap)
         return (res >= 0 || res < -PAGE_SIZE);
     else

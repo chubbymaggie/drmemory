@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -233,7 +233,7 @@ OPTION_CLIENT(client, callstack_max_frames, uint, 20, 0, 4096,
               "How many call stack frames to record for each non-leak error report.  A larger maximum will ensure that no call stack is truncated, but can use more memory and slow down the tool if there are many error reports with large callstacks.  This option must be larger than the largest suppression supplied to -suppress.  The separate option -malloc_max_frames controls the callstack size for leak reports, while -free_max_frames controls the callstack size for freed memory overlap reports from -delay_frees_stack.")
 OPTION_CLIENT(client, malloc_max_frames, uint, 12, 0, 4096,
               "How many call stack frames to record on each malloc",
-              "How many call stack frames to record on each malloc, for use in leak error reports as well as alloc/free mismatch error reports.  A larger maximum will ensure that no call stack is truncated, but can use more memory and slow down the tool.")
+              "How many call stack frames to record on each malloc, for use in leak error reports as well as alloc/free mismatch error reports (unless leaks are disabled (via -no_count_leaks or -light) and -malloc_callstacks is also disabled).  A larger maximum will ensure that no call stack is truncated, but can use more memory and slow down the tool.")
 OPTION_CLIENT(client, free_max_frames, uint, 6, 0, 4096,
               "How many call stack frames to record on each free",
               "If -delay_frees_stack is enabled, this controls how many call stack frames to record for each use-after-free informational report.  A larger maximum will ensure that no call stack is truncated, but can use more memory and slow down the tool.")
@@ -288,7 +288,7 @@ OPTION_CLIENT(client, lib_blacklist_frames, uint, 4, 0, 4096,
               "The number of frames, starting from the top, that must match -lib_blacklist in a callstack in order for an error report to be separated from the regularly reported errors.  Setting this value to 0 disables blacklist-based error separation.  If the top frame is a system call or a replace_* Dr. Memory routine, it is ignored and matching starts from the second frame.")
 OPTION_CLIENT_STRING(client, lib_whitelist, "",
                      ",-separated list of path patterns for which to report errors",
-                     "Error reports where not a single one of the top N frames' module paths match any of these ,-separated patterns will be separated by default as merely potential errors, where N is -lib_whitelist_frames.  These errors are reported to potential_errors.txt rather than results.txt.  This feature is disabled if -lib_whitelist_frames is 0 or if -lib_whitelist is empty.  This whitelist takes priority over -lib_blacklist: i.e., if any top frame matches the whitelist, the error will be reported normally, even if all frames also match the blacklist.  Each pattern can use * and ? wildcards (which have the same semantics as in suppression files) and is matched against the full path of each module.  The default on Windows is set to $SYSTEMROOT*.dll if not otherwise specified.")
+                     "Error reports where not a single one of the top N frames' module paths match any of these ,-separated patterns will be separated by default as merely potential errors, where N is -lib_whitelist_frames.  These errors are reported to potential_errors.txt rather than results.txt.  This feature is disabled if -lib_whitelist_frames is 0 or if -lib_whitelist is empty.  This whitelist takes priority over -lib_blacklist: i.e., if any top frame matches the whitelist, the error will be reported normally, even if all frames also match the blacklist.  Each pattern can use * and ? wildcards (which have the same semantics as in suppression files) and is matched against the full path of each module.")
 OPTION_CLIENT(client, lib_whitelist_frames, uint, 4, 0, 4096,
                      "The number of frames to match vs -lib_whitelist",
                      "The number of frames, starting from the top, that must not match -lib_whitelist in a callstack in order for an error report to be separated from the regularly reported errors.  Setting this value to 0 disables -lib_whitelist-based error separation.  If the top frame is a system call or a replace_* Dr. Memory routine, it is ignored and matching starts from the second frame.")
@@ -396,8 +396,8 @@ OPTION_CLIENT_BOOL(client, show_all_threads, false,
                    "Print the callstack of each thread creation point",
                    "Whether to print the callstack of each thread creation point (whether referenced in an error report or not) to the global logfile.  This can be useful to identify which thread was involved in error reports, as well as general diagnostics for what threads were present during a run.  Look for 'NEW THREAD' in the global.pid.log file in the log directory where the results.txt file is found.")
 OPTION_CLIENT_BOOL(client, conservative, false,
-                   "Be conservative whenever reading application memory",
-                   "Be conservative whenever reading application memory.  When this option is disabled, "TOOLNAME" may read return addresses and arguments passed to functions without fault-handling code, which gains performance but can sacrifice robustness when running hand-crafted assembly code")
+                   "Be conservative reading app memory and assuming dead regs",
+                   "Be conservative whenever reading application memory and when assuming registeres are dead.  When this option is disabled, "TOOLNAME" may read return addresses and arguments passed to functions without fault-handling code, which gains performance but can sacrifice robustness when running hand-crafted assembly code.  Additionally, with this option disabled, register liveness does not consider faults.")
 
 /* Exposed for Dr. Memory only */
 OPTION_CLIENT_BOOL(drmemscope, check_uninit_cmps, true,
@@ -419,6 +419,9 @@ OPTION_CLIENT_BOOL(drmemscope, check_uninit_all, false,
 OPTION_CLIENT_BOOL(drmemscope, strict_bitops, false,
                    "Fully check definedness of bit operations",
                    "Currently, Dr. Memory's definedness granularity is per-byte.  This can lead to false positives on code that uses bitfields.  By default, Dr. Memory relaxes its uninitialized checking on certain bit operations that are typically only used with bitfields, to avoid these false positives.  However, this can lead to false negatives.  Turning this option on will eliminate all false negatives (at the cost of potential false positives).  Eventually Dr. Memory will have bit-level granularity and this option will go away.")
+OPTION_CLIENT_BOOL(drmemscope, check_pc, true,
+                   "Check the program counter for unaddressable execution",
+                   "Check the program counter on each instruction to ensure it is executing from valid memory.")
 OPTION_CLIENT_SCOPE(drmemscope, stack_swap_threshold, int, 0x9000, 256, INT_MAX,
                     "Stack change amount to consider a swap",
                     "Stack change amount to consider a swap instead of an allocation or de-allocation on the same stack.  "TOOLNAME" attempts to dynamically tune this value unless it is changed from its default.")
@@ -431,6 +434,10 @@ OPTION_CLIENT_SCOPE(drmemscope, report_max, int, 20000, -1, INT_MAX,
 OPTION_CLIENT_SCOPE(drmemscope, report_leak_max, int, 10000, -1, INT_MAX,
                     "Maximum leaks to report (-1=no limit)",
                     "Maximum leaks to report (-1=no limit).  This includes 'potential' leaks listed separately.")
+OPTION_CLIENT_BOOL(drmemscope, report_write_to_read_only, true,
+                   "Report writes to read-only memory as unaddressable errors",
+                   "Report writes to read-only memory as unaddressable errors.")
+
 OPTION_CLIENT_BOOL(drmemscope, show_duplicates, false,
                    "Print details on each duplicate error",
                    "Print details on each duplicate error rather than only showing unique error details")
@@ -487,7 +494,9 @@ OPTION_CLIENT_BOOL(drmemscope, handle_leaks_only, false,
                    "Puts "TOOLNAME" into a handle-leak-check-only mode that has lower overhead but does not detect other types of errors other than handle leaks in Windows.")
 #endif /* WINDOWS */
 /* XXX i#111: re-enable once 64-bit full mode is supported */
-OPTION_CLIENT_BOOL(drmemscope, check_uninitialized, IF_X64_ELSE(false, true),
+/* XXX i#1726: only pattern is currently supported on ARM */
+OPTION_CLIENT_BOOL(drmemscope, check_uninitialized,
+                   IF_ARM_ELSE(false, IF_X64_ELSE(false, true)),
                    "Check for uninitialized read errors",
                    "Check for uninitialized read errors.  When disabled, puts "TOOLNAME" into a mode that has lower overhead but does not detect definedness errors.  Furthermore, the lack of definedness information reduces accuracy of leak identification, resulting in potentially failing to identify some leaks.")
 OPTION_CLIENT_BOOL(drmemscope, check_stack_bounds, false,
@@ -521,7 +530,10 @@ OPTION_CLIENT_BOOL(internal, filter_handle_leaks, true,
 OPTION_CLIENT(internal, handle_leak_threshold, uint, 50, 1, 65535,
               "Report leaks of handles created more often than this threshold",
               "Only applies for -filter_handle_leaks.  Report leaks of handles created more often than this threshold.")
-OPTION_CLIENT_BOOL(drmemscope, check_heap_mismatch, true,
+/* XXX i#1839: on 64-bit, false positive Windows vs C mismatches are
+ * proving difficult to handle.  We are disabling the feature for now.
+ */
+OPTION_CLIENT_BOOL(drmemscope, check_heap_mismatch, IF_X64_ELSE(false, true),
                    "Whether to check for Windows API vs C library mismatches",
                    "Whether to check for Windows API vs C library mismatches")
 #endif
@@ -531,6 +543,9 @@ OPTION_CLIENT_BOOL(drmemscope, check_delete_mismatch, true,
 OPTION_CLIENT_BOOL(drmemscope, check_prefetch, true,
                    "Whether to report unaddressable prefetches as warnings",
                    "Whether to report unaddressable prefetches as warnings")
+OPTION_CLIENT_BOOL(drmemscope, malloc_callstacks, false,
+                   "Record callstacks on allocs to use when reporting mismatches",
+                   "Record callstacks on allocations to use when reporting alloc/free mismatches.  If leaks are enabled (i.e., -count_leaks is on), this option is always enabled.  The callstack size is controlled by -malloc_max_frames.  When enabled in light mode, this option incurs additional overhead, particularly on malloc-intensive applications.")
 
 OPTION_CLIENT_STRING(drmemscope, prctl_whitelist, "",
                      "Disable instrumentation unless PR_SET_NAME is on list",
@@ -575,9 +590,13 @@ OPTION_CLIENT_SCOPE(drmemscope, perturb_seed, uint, 0, 0, UINT_MAX,
 OPTION_CLIENT_BOOL(drmemscope, unaddr_only, false,
                    "Enables a lightweight mode that detects only unaddressable errors",
                    "This option enables a lightweight mode that only detects critical errors of unaddressable accesses on heap data.  This option cannot be used with 'light' or 'check_uninitialized'.")
-OPTION_CLIENT_SCOPE(drmemscope, pattern, uint, 0, 0, USHRT_MAX,
+/* XXX i#111/i#1810: until 64-bit shadow is fully ported, pattern is the x64 default */
+/* XXX i#1726: only pattern is currently supported on ARM */
+OPTION_CLIENT_SCOPE(drmemscope, pattern, uint,
+                    IF_ARM_ELSE(DEFAULT_PATTERN, IF_X64_ELSE(DEFAULT_PATTERN, 0)),
+                    0, USHRT_MAX,
                     "Enables pattern mode. A non-zero 2-byte value must be provided",
-                    "Use sentinels to detect accesses on unaddressable regions around allocated heap objects.  When this option is enabled, checks for uninitialized read errors will be disabled.")
+                    "Use sentinels to detect accesses on unaddressable regions around allocated heap objects.  When this option is enabled, checks for uninitialized read errors will be disabled.  The value passed as the pattern must be a non-zero 2-byte value.")
 OPTION_CLIENT_BOOL(drmemscope, persist_code, false,
                    "Cache instrumented code to speed up future runs (light mode only)",
                    "Cache instrumented code to speed up future runs.  For short-running applications, this can provide a performance boost.  It may not be worth enabling for long-running applications.  Currently, this option is only supported with -light or -no_check_uninitialized.  It also currently fails to re-use randomized libraries on Windows, resulting in less of a performance boost for applications that use many libraries with ASLR enabled.")
@@ -587,6 +606,167 @@ OPTION_CLIENT_STRING(drmemscope, persist_dir, "<install>/logs/codecache",
 OPTION_CLIENT_BOOL(drmemscope, soft_kills, true,
                    "Ensure external processes terminated by this one exit cleanly",
                    "Ensure external processes terminated by this one exit cleanly.  Often applications forcibly terminate child processes, which can prevent proper leak checking and error and suppression summarization as well as generation of symbol and code cache files needed for performance.  When this option is enabled, every termination call to another process will be replaced with a directive to the Dr. Memory running in that process to perform a clean shutdown.  If there is no DynamoRIO-based tool in the target process, the regular termination call will be carried out.")
+OPTION_CLIENT_BOOL(drmemscope, coverage, false,
+                   "Measure and provide code coverage information",
+                   "Measure code coverage during application execution.  The resulting data is written to a separate file named with a 'drcov' prefix in the same directory as Dr. Memory's other results files.  The raw data can be turned into a human-readable format using the drcov2lcov utility.")
+OPTION_CLIENT_BOOL(drmemscope, fuzz, false,
+                   "Enable fuzzing by Dr. Memory",
+                   "Enable fuzzing by Dr. Memory.  See the other fuzz_* options for all of the different fuzzing options.")
+OPTION_CLIENT_STRING(drmemscope, fuzz_module, "",
+                     "The fuzz target module name. The application main executable is used by default.",
+                     "The fuzz target module name. The application main executable is used by default.")
+# define FUZZ_FUNC_DEFAULT_NAME "DrMemFuzzFunc"
+OPTION_CLIENT_STRING(drmemscope, fuzz_function, FUZZ_FUNC_DEFAULT_NAME,
+                     "The fuzz target function symbol name. "FUZZ_FUNC_DEFAULT_NAME" is used by default.",
+                     "The fuzz target function symbol name. "FUZZ_FUNC_DEFAULT_NAME" is used by default.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_offset, uint, 0, 0, UINT_MAX,
+                     "The fuzz target function offset in the module.",
+                     "The fuzz target function offset in the module.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_num_args, uint, 2, 0, 32,
+                    "The number of arguments passed to the fuzz target function.",
+                    "The number of arguments passed to the fuzz target function.  For vararg functions this must match the actual number of arguments passed by the caller.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_data_idx, uint, 0, 0, 31,
+                    "The fuzz data argument index.",
+                    "The fuzz data argument index.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_size_idx, uint, 1, 0, 31,
+                    "The fuzz data size argument index.",
+                    "The fuzz data size argument index.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_num_iters, int, 100, 0, INT_MAX,
+                    "The number of times to repeat executing the target function.",
+                    "The number of times to repeat executing the target function. "
+                    "Use 0 for no repeat and no mutation, and -1 to repeat until the mutator is exhausted.")
+OPTION_CLIENT_BOOL(drmemscope, fuzz_replace_buffer, false,
+                   "Replace the input data buffer with separately allocated memory.",
+                   "Replace the input data buffer with separately allocated memory.  This can be used for fuzzing functions whose input data is stored in read-only memory, or for fuzzing functions with different input data sizes, e.g., loading data via -fuzz_input_file.  Note: this may cause problems if other pointers point to the original buffer, or the replaced buffer is used after the fuzzing iterations.")
+OPTION_CLIENT_STRING(drmemscope, fuzz_call_convention, "",
+                     "The calling convention used by the fuzz target function."NL
+                     "        The possible calling convention codes are:"NL
+                     "             arm32    = ARM32"NL
+                     "             amd64    = AMD64"NL
+                     "             fastcall = fastcall"NL
+                     "             ms64     = Microsoft x64 (Visual Studio)"NL
+                     "             stdcall  = cdecl or stdcall"NL
+                     "             thiscall = thiscall",
+                     "The calling convention used by the fuzz target function. It can be specified using one of the following codes:"
+                     "<pre>"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>arm32    = ARM32</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>amd64    = AMD64</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>fastcall = fastcall</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>ms64     = Microsoft x64 (Visual Studio)</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>stdcall  = cdecl or stdcall</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>thiscall = thiscall</code>"
+                     "</pre>"
+                     "If no calling convention is specified, the most common calling convention on the platform is used:"
+                     "<pre>"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>32-bit ARM:     arm32</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>32-bit Unix:    stdcall</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>32-bit Windows: stdcall</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>64-bit Unix:    amd64</code>\n"
+                     "&nbsp;&nbsp;&nbsp;&nbsp;<code>64-bit Windows: ms64</code>\n"
+                     "</pre>")
+OPTION_CLIENT_BOOL(drmemscope, fuzz_dump_on_error, true,
+                   "Dump the current fuzz input to current log directory on an error report.",
+                   "Dump the current fuzz input to current log directory on an error report.  The file name can be found in the error report summary.")
+OPTION_CLIENT_STRING(drmemscope, fuzz_input_file, "",
+                     "Load data from specified file as fuzz input.",
+                     "Load data from specified file as fuzz input.  It can be used with -fuzz_num_iters 0 to reproduce an error from the input generated by -fuzz_dump_on_error.  The data might be truncated if the data size is larger than the input buffer size.  Use -fuzz_replace_buffer to replace the input buffer with a separately allocated buffer.")
+OPTION_CLIENT_STRING(drmemscope, fuzz_corpus, "",
+                     "Load a corpus of input data files and perform coverage based fuzzing.",
+                     "Load a corpus of input data files from the specified directory, perform coverage based fuzzing, and dump input data that causes more coverage.")
+OPTION_CLIENT_STRING(drmemscope, fuzz_corpus_out, "",
+                     "Create and store the minimized corpus inputs from -fuzz_corpus to -fuzz_corpus_out",
+                     "Create the minimized corpus inputs from -fuzz_corpus and dump them to the directory specified by -fuzz_corpus_out.")
+OPTION_CLIENT_BOOL(drmemscope, fuzz_bbcov, false,
+                   "Enable basic block coverage guided fuzzing. Not yet implemented.",
+                   "Enable basic block coverage guided fuzzing. Not yet implemented.")
+/* long comment includes HTML escape characters (http://www.doxygen.nl/htmlcmds.html) */
+OPTION_CLIENT_STRING(drmemscope, fuzz_target, "",
+                     "Fuzz test the target program according to the specified descriptor"NL
+                     "        Fuzz descriptor format: <target>|<arg-count>|<buffer-index>|<size-index>|<repeat-count>[|<calling-convention>]"NL
+                     "        where <target> is one of:"NL
+                     "             <module>!<symbol>"NL
+                     "             <module>+<offset>"NL
+                     "        The <arg-count> specifies the number of arguments to the function (for vararg"NL
+                     "        functions this must match the actual number of arguments passed by the app)."NL
+                     "        The <*-index> arguments specify the index of the corresponding parameter in"NL
+                     "        the target function. The <repeat-count> indicates the number of times to repeat"NL
+                     "        the target function (use 0 for no repeat and no mutation, and -1 to repeat until"NL
+                     "        the mutator is exhausted. The alias <main> may be given as the <module> to"NL
+                     "        specify the main module of the program."NL
+                     "        The calling convention codes are:"NL
+                     "             1 = AMD64"NL
+                     "             2 = Microsoft x64 (Visual Studio)"NL
+                     "             3 = ARM32"NL
+                     "             4 = cdecl or stdcall"NL
+                     "             5 = fastcall"NL
+                     "             6 = thiscall"NL,
+                     "Fuzz test the target program according to the specified descriptor, which should have the format:<pre>&nbsp;&nbsp;&nbsp;&nbsp;<code>&lt;target&gt;|&lt;arg-count&gt;|&lt;buffer-index&gt;|&lt;size-index&gt;|&lt;repeat-count&gt;[|&lt;calling-convention&gt;]</code></pre>where <code>&lt;target&gt;</code> has one of two formats:<pre>&nbsp;&nbsp;&nbsp;&nbsp;<code>&lt;module&gt;!&lt;symbol&gt;</code>\n&nbsp;&nbsp;&nbsp;&nbsp;<code>&lt;module&gt;+&lt;offset&gt;</code></pre>Here, <code>&lt;module&gt;</code> refers to a single binary image file such as a library (.so or .dll) or an application executable (.exe on Windows). The <code>&lt;offset&gt;</code> specifies the entry point of the target function as a hexadecimal offset (e.g. '0xf7d4') from the start of the module that contains it (i.e., the library or executable image). The <code>&lt;symbol&gt;</code> may be either a plain C function name, a mangled C++ symbol, or (Windows only) a de-mangled C++ symbol of the form returned by the \\ref page_symquery. The option <code>-fuzz_mangled_names</code> is required for using mangled names in Windows, and the mangled name must have every '@' character escaped by substituting a '-' in its place. The module alias &lt;main&gt; may be used to refer to the main module of the process, which is the program executable.<br/><br/>The &lt;arg-count&gt; specifies the number of arguments to the function (for vararg functions this must match the actual number of arguments passed by the app). The &lt;*-index&gt; arguments specify the index of the corresponding parameter in the target function. The &lt;repeat-count&gt; indicates the number of times to repeat the target function (use 0 to repeat until the mutator is exhuasted). The optional &lt;calling-convention&gt; can be specified using one of the following codes:<pre>&nbsp;&nbsp;&nbsp;&nbsp;<code>1 = AMD64</code>\n&nbsp;&nbsp;&nbsp;&nbsp;<code>2 = Microsoft x64 (Visual Studio)</code>\n&nbsp;&nbsp;&nbsp;&nbsp;<code>3 = ARM32</code>\n&nbsp;&nbsp;&nbsp;&nbsp;<code>4 = cdecl or stdcall</code>\n&nbsp;&nbsp;&nbsp;&nbsp;<code>5 = fastcall</code>\n&nbsp;&nbsp;&nbsp;&nbsp;<code>6 = thiscall</code></pre>")
+OPTION_CLIENT_STRING(drmemscope, fuzz_mutator_lib, "",
+                     "Specify a custom third-party mutator library",
+                     "Specify a custom third-party mutator library to use instead of the default mutator library provided by Dr. Fuzz.")
+OPTION_CLIENT_STRING_REPEATABLE(drmemscope, fuzz_mutator_ops, "",
+                     "Specify mutator options",
+                     "Specify options to pass to either the default mutator library or to the custom third-party mutator library named in -fuzz_mutator_lib.")
+
+/* XXX: these fuzz_mutator docs and options essentially duplicate drfuzz.dox and
+ * the default mutator options in drfuzz_mutator.c, but it may not be worth
+ * sharing code/docs via some new *x.h file unless we start adding more and more
+ * options.
+ */
+OPTION_CLIENT_STRING(drmemscope, fuzz_mutator_alg, "ordered",
+                     "Specify the mutator algorithm: 'random' or 'ordered'",
+                     "Specify the mutator algorithm as one of these strings:@@<ul>"
+                     "<li>random = random selection of bits or numbers.@@"
+                     "<li>ordered = ordered sequence of bits or numbers.@@"
+                     "</ul>@@See also \\ref sec_drfuzz_mutators.@@")
+OPTION_CLIENT_STRING(drmemscope, fuzz_mutator_unit, "bits",
+                     "Specify the mutator unit: 'bits' or 'num'",
+                     "Specify the mutator unit of operation as one of these strings:@@<ul>"
+                     "<li>bits = mutation by bit flipping.@@"
+                     "<li>num = mutation by random number generation.@@"
+                     "<li>token = mutation by inserting tokens from -fuzz_dictionary.@@"
+                     "</ul>@@See also \\ref sec_drfuzz_mutators.@@")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_mutator_flags, uint, 1, 0, UINT_MAX,
+                    "Specify mutator flags",
+                    "Specify flags controlling mutator operation:@@<ul>"
+                    "<li>0x1 = reset to the original buffer value passed by the app before each mutation.@@"
+                    "<li>0x2 = seed the mutator's random number generator with the current clock time.@@"
+                    "</ul>@@See also \\ref sec_drfuzz_mutators.@@")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_mutator_sparsity, uint, 1, 0, UINT_MAX,
+                    "Values to skip between mutations",
+                    "Specifies a number of values to skip between mutations.  See also \\ref sec_drfuzz_mutators.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_mutator_max_value, uint64, 0, 0, ULLONG_MAX,
+                    "Maximum mutation value for <8-byte buffers (0 is unlimited)",
+                    "For buffers of size 8 bytes or smaller, specifies the maximum mutation value. Use value 0 to disable the maximum value (i.e., limit only by the buffer capacity).  See also \\ref sec_drfuzz_mutators.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_mutator_random_seed, uint64, 0x5a8390e9a31dc65fULL, 0, ULLONG_MAX,
+                    "Randomization seed for the random algorithm",
+                    "Randomization seed for -fuzz_mutator_alg random.  The default random seed is arbitrary, selected to have an equal number of 0 and 1 bits.  See also \\ref sec_drfuzz_mutators.")
+OPTION_CLIENT_STRING(drmemscope, fuzz_dictionary, "",
+                     "Specify a dictionary containing tokens for mutation",
+                     "Specify a dictionary file listing tokens to use for mutation by insertion into the input buffer.  The file must be a text file with one double-quote-delimited token per line.  Specifying this option automatically selects -fuzz_mutator_unit token.")
+
+OPTION_CLIENT_STRING(drmemscope, fuzz_one_input, "",
+                     "Specify one fuzz input value to test."NL
+                     "         The value is a hexadecimal byte sequence using the literal byte order (i.e., non-endian),"NL
+                     "         for example '7f392a' represents byte array { 0x7f, 0x39, 0x2a }.",
+                     "Specify one fuzz input value to test. The value is a hexadecimal byte sequence using the printed byte order (i.e., non-endian), for example '7f392a' represents byte array { 0x7f, 0x39, 0x2a }. If the value length does not match the fuzz target buffer length, it will be truncated or zero-padded to fit.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_buffer_fixed_size, uint, 0, 0, UINT_MAX,
+                    "Set a fixed mutation span",
+                    "Use this option to ignore the size of the buffer argument and instead mutate a fixed span of bytes. If the actual buffer size is smaller than the specified fixed size, the actual size will be used instead.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_buffer_offset, uint, 0, 0, UINT_MAX,
+                    "Set an offset for the mutation span",
+                    "Use this option to constrain mutation to a subset of buffer bytes starting at the specified offset from the buffer start.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_skip_initial, uint, 0, 0, UINT_MAX,
+                    "Skip fuzzing for the specified number of target invocations",
+                    "Skip fuzzing for the specified number of target invocations.")
+OPTION_CLIENT_SCOPE(drmemscope, fuzz_stat_freq, uint, 0, 0, UINT_MAX,
+                    "Enable fuzzer status logging with the specified frequency",
+                    "Specify the fuzzer status log frequency in number of fuzz iterations (no status is logged when this option is not set).")
+#ifdef WINDOWS
+OPTION_CLIENT_BOOL(drmemscope, fuzz_mangled_names, false,
+                   "Enable mangled names for fuzz targets on Windows",
+                   "By default, fuzz targets on Windows must use demangled names. Use this option to enabled mangled names. It is required to escape every '@' character by replacing it with a '-' in the mangled name (due to delimiter conflicts over '@' in the toolchain).")
+#endif
 
 /****************************************************************************
  * Un-documented client options, for developer use only
@@ -701,7 +881,8 @@ OPTION_CLIENT_BOOL(internal, disable_crtdbg, true,
                    "Disable debug CRT checks")
 #endif
 
-OPTION_CLIENT_BOOL(internal, zero_stack, true,
+/* XXX i#1726: port the zeroing loop to ARM */
+OPTION_CLIENT_BOOL(internal, zero_stack, IF_ARM_ELSE(false, true),
                    "When detecting leaks but not keeping definedness info, zero old stack frames",
                    "When detecting leaks but not keeping definedness info, zero old stack frames in order to avoid false negatives from stale stack values.  This is potentially unsafe.")
 OPTION_CLIENT_BOOL(internal, zero_retaddr, true,

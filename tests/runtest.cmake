@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 
@@ -334,28 +334,29 @@ foreach (str ${patterns})
     string(REGEX REPLACE "(^|\n)%if WINDOWS[^%]+\n%endif\n" "\\1" ${str} "${${str}}")
     string(REGEX REPLACE "(^|\n)%if !CYGWIN[^%]+\n%endif\n" "\\1" ${str} "${${str}}")
     # distinguish pre-vista from post-vista
-    if ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.0")
+    if ("${CMAKE_SYSTEM_VERSION}" VERSION_LESS "6.0")
       string(REGEX REPLACE "(^|\n)%if CYGWIN_VISTAPLUS[^%]+\n%endif\n" "\\1"
         ${str} "${${str}}")
-    else ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.0")
+    else ("${CMAKE_SYSTEM_VERSION}" VERSION_LESS "6.0")
       string(REGEX REPLACE "(^|\n)%if CYGWIN_PREVISTA[^%]+\n%endif\n" "\\1"
         ${str} "${${str}}")
-    endif ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.0")
+    endif ("${CMAKE_SYSTEM_VERSION}" VERSION_LESS "6.0")
   else (WIN32 AND NOT USE_DRSYMS AND "${${str}}" MATCHES "%if CYGWIN")
     if (WIN32)
       string(REGEX REPLACE "(^|\n)%if UNIX[^%]+\n%endif\n" "\\1" ${str} "${${str}}")
       string(REGEX REPLACE "(^|\n)%if CYGWIN[^%]+\n%endif\n" "\\1" ${str} "${${str}}")
       # distinguish pre-win8 from win8
-      if ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.2")
-        string(REGEX REPLACE "(^|\n)%if WINDOWS_8[^%]+\n%endif\n" "" ${str} "${${str}}")
+      if ("${CMAKE_SYSTEM_VERSION}" VERSION_LESS "6.2")
+        string(REGEX REPLACE "(^|\n)%if WINDOWS_8_PLUS[^%]+\n%endif\n" ""
+          ${str} "${${str}}")
         string(REGEX REPLACE "(^|\n)%if WINDOWS_PRE_8[^%]+\n%endif\n" "\\1"
           ${str} "${${str}}")
-      else ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.2")
+      else ("${CMAKE_SYSTEM_VERSION}" VERSION_LESS "6.2")
         string(REGEX REPLACE "(^|\n)%if WINDOWS_PRE_8[^%]+\n%endif\n" ""
           ${str} "${${str}}")
-        string(REGEX REPLACE "(^|\n)%if WINDOWS_8[^%]+\n%endif\n" "\\1"
+        string(REGEX REPLACE "(^|\n)%if WINDOWS_8_PLUS[^%]+\n%endif\n" "\\1"
           ${str} "${${str}}")
-      endif ("${CMAKE_SYSTEM_VERSION}" STRLESS "6.2")
+      endif ("${CMAKE_SYSTEM_VERSION}" VERSION_LESS "6.2")
     elseif (UNIX)
       string(REGEX REPLACE "(^|\n)%if WINDOWS[^%]+\n%endif\n" "\\1" ${str} "${${str}}")
       string(REGEX REPLACE "(^|\n)%if CYGWIN[^%]+\n%endif\n" "\\1" ${str} "${${str}}")
@@ -387,6 +388,9 @@ foreach (str ${patterns})
   endwhile()
 
   string(REGEX REPLACE "(^|\n)%(if|endif)[^\n]*\n" "\\1" ${str} "${${str}}")
+
+  # We support skipping lines (w/ no regex support file can't have .*)
+  string(REGEX REPLACE "(^|\n)%SKIPLINE\n" "\\1.*\n" ${str} "${${str}}")
 endforeach (str)
 
 # Remove up to and including the line matched by 'needle'.  Used to ensure that
@@ -423,6 +427,17 @@ set(cmd_tomatch "${cmd_err}")
 
 # remove default-suppressed errors (varies by platform: i#339)
 string(REGEX REPLACE ", *[0-9]+ default-suppressed" "" cmd_tomatch "${cmd_tomatch}")
+
+# remove platform-specific paths to log files
+string(REGEX REPLACE "/[-A-Za-z0-9\\._/]+logs/[-A-Za-z0-9\\._/]+"
+  "" cmd_tomatch "${cmd_tomatch}")
+if (WIN32)
+  string(REGEX REPLACE "[A-Za-z]:[/\\\\][-A-Za-z0-9\\._/\\\\]+logs[-A-Za-z0-9\\._/\\\\]+"
+    "" cmd_tomatch "${cmd_tomatch}")
+endif (WIN32)
+
+# remove trailing spaces
+string(REGEX REPLACE " *\n" "\n" cmd_tomatch "${cmd_tomatch}")
 
 foreach (line ${lines})
   set(remove_line ON)
@@ -467,7 +482,7 @@ endforeach (line)
 # check results.txt
 # XXX i#1688: Disable leak tests for Dr. Heapstat until the offline
 # processor is refactored.
-if (resmatch AND TOOL_DR_MEMORY)
+if (resmatch AND NOT TOOL_DR_HEAPSTAT)
   if (NOT "${postcmd}" STREQUAL "")
     string(REGEX REPLACE "@@" " " postcmd "${postcmd}")
     string(REGEX REPLACE "@" ";" postcmd "${postcmd}")
@@ -641,4 +656,4 @@ if (resmatch AND TOOL_DR_MEMORY)
     endif (cmd2_result)
   endif ("${cmd}" MATCHES "suppress" AND NOT "${cmd}" MATCHES "-suppress")
 
-endif (resmatch AND TOOL_DR_MEMORY)
+endif (resmatch AND NOT TOOL_DR_HEAPSTAT)

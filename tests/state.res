@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2014-2016 Google, Inc.  All rights reserved.
 # **********************************************************
 #
 # Dr. Memory: the memory debugger
@@ -19,9 +19,4 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 Error #1: UNADDRESSABLE ACCESS: writing 1 byte(s)
-%if WINDOWS
-state.c:131
-%endif
-%if UNIX
-state.c:131
-%endif
+state.c:133

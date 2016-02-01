@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -26,13 +26,24 @@
 #else
 # include <malloc.h>
 #endif
+#include <stdint.h>
+#include <stdlib.h>
+#include <assert.h>
+#ifdef UNIX
+# include <errno.h>
+# include <unistd.h>
+#endif
 
-/* PR 406323: handle auxiliary alloc routines: memalign(), valloc(), etc. */
+/* i#94: handle auxiliary alloc routines: memalign(), valloc(), etc. */
+
+#define ALIGNED(x, alignment) ((((uintptr_t)x) & ((alignment)-1)) == 0)
 
 int main()
 {
-#ifdef LINUX
     void *p;
+    int i, res;
+    char c;
+#ifdef LINUX
     struct mallinfo info;
 
     p = malloc(37);
@@ -49,10 +60,71 @@ int main()
     p = malloc_get_state();
     free(p);
 #elif defined(MACOS)
-    /* FIXME i#1438: add tests of Mac-specific malloc API */
+    /* Tests for malloc zones (i#1699) are in mac_zones.c */
 #endif
 
-    /* XXX PR 406323: add aligned-malloc tests once we have support */
+    p = NULL;
+    res = posix_memalign(&p, 256, 42);
+    assert(res == 0 && p != NULL);
+    assert(ALIGNED(p, 256));
+    c = *((char *)p - 1); /* unaddr */
+    c = *((char *)p + 42); /* unaddr */
+    free(p);
+
+    /* Test with pulling from free list (has to be run "-delay_frees 0").
+     * First, prime the free list.
+     */
+    for (i = 0; i < 10; i++) {
+        p = malloc(1U << i);
+        free(p);
+    }
+
+    p = NULL;
+    res = posix_memalign(&p, 128, 99);
+    assert(res == 0 && p != NULL);
+    assert(ALIGNED(p, 128));
+    c = *((char *)p - 1); /* unaddr */
+    c = *((char *)p + 99); /* unaddr */
+    free(p);
+
+    /* Test non-power-of-2 */
+    res = posix_memalign(&p, 127, 99);
+    assert(res == EINVAL);
+
+    /* Test mmap */
+    p = NULL;
+    res = posix_memalign(&p, 512, 256*1024); /* 128K is our mmap min */
+    assert(res == 0 && p != NULL);
+    assert(ALIGNED(p, 512));
+    c = *((char *)p - 1); /* unaddr */
+    c = *((char *)p + 256*1024); /* unaddr */
+    free(p);
+
+#ifndef MACOS
+    p = memalign(64, 3);
+    assert(p != NULL);
+    assert(ALIGNED(p, 64));
+    c = *((char *)p - 1); /* unaddr */
+    c = *((char *)p + 3); /* unaddr */
+    free(p);
+#endif
+
+    p = valloc(643);
+    assert(p != NULL);
+    assert(ALIGNED(p, sysconf(_SC_PAGESIZE)));
+    c = *((char *)p - 1); /* unaddr */
+    c = *((char *)p + 643); /* unaddr */
+    free(p);
+
+#ifndef MACOS
+    p = pvalloc(643);
+    assert(p != NULL);
+    assert(ALIGNED(p, sysconf(_SC_PAGESIZE)));
+    c = *((char *)p - 1); /* unaddr */
+    c = *((char *)p + 643); /* ok */
+    c = *((char *)p + sysconf(_SC_PAGESIZE)); /* unaddr */
+    free(p);
+#endif
 
     printf("success\n");
     return 0;

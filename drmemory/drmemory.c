@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -55,8 +55,10 @@
 #include "dr_api.h"
 #include "drwrap.h"
 #include "drx.h"
+#include "drcovlib.h"
 #include "drmemory.h"
-#include "readwrite.h"
+#include "instru.h"
+#include "slowpath.h"
 #include "fastpath.h"
 #include "report.h"
 #include "shadow.h"
@@ -71,6 +73,7 @@
 #include <stddef.h> /* for offsetof */
 #include "pattern.h"
 #include "frontend.h"
+#include "fuzzer.h"
 #ifdef WINDOWS
 # include "handlecheck.h"
 #endif /* WINDOWS */
@@ -125,6 +128,7 @@ static void
 drmem_options_init(const char *opstr)
 {
     options_init(opstr);
+
     /* set globals */
     op_print_stderr = options.use_stderr && !options.quiet;
     op_verbose_level = options.verbose;
@@ -177,12 +181,14 @@ dump_statistics(void)
     dr_fprintf(f_global, "adjust_esp:%10u slow; %10u fast\n", adjust_esp_executions,
                adjust_esp_fastpath);
     dr_fprintf(f_global, "slow_path invocations: %10u\n", slowpath_executions);
+#ifdef X86
     dr_fprintf(f_global, "med_path invocations: %10u, fast movs: %10u, fast cmps: %10u\n",
                medpath_executions, movs4_med_fast, cmps1_med_fast);
     dr_fprintf(f_global, "movs4: src unalign: %10u, dst unalign: %10u, src undef: %10u\n",
                movs4_src_unaligned, movs4_dst_unaligned, movs4_src_undef);
     dr_fprintf(f_global, "cmps1: src undef: %10u\n",
                cmps1_src_undef);
+#endif
     dr_fprintf(f_global, "reads:  slow: %8u, fast: %8u, fast4: %8u, total: %8u\n",
                read_slowpath, read_fastpath, read4_fastpath,
                read_slowpath+read_fastpath+read4_fastpath);
@@ -411,6 +417,8 @@ event_exit(void)
     heap_region_exit();
     if (options.pattern != 0)
         pattern_exit();
+    if (options.fuzz)
+        fuzzer_exit();
     if (options.shadowing) {
         shadow_exit();
         if (umbra_exit() != DRMF_SUCCESS)
@@ -425,6 +433,17 @@ event_exit(void)
         drsymcache_exit();
 #endif
     utils_exit();
+
+    if (options.coverage) {
+        const char *covfile;
+        if (drcovlib_logfile(NULL, &covfile) == DRCOVLIB_SUCCESS) {
+            ELOGF(0, f_results, "Code coverage raw data: %s"NL, covfile);
+            NOTIFY_COND(options.summary, f_global, "Code coverage raw data: %s"NL,
+                        covfile);
+        }
+        if (drcovlib_exit() != DRCOVLIB_SUCCESS)
+            ASSERT(false, "failed to exit drcovlib");
+    }
 
     drx_exit();
 
@@ -562,11 +581,13 @@ event_thread_init(void *drcontext)
 
     if (options.show_all_threads && !first_thread) {
         dr_mcontext_t mc;
+#ifdef WINDOWS
         app_pc start_addr;
-#ifdef USE_DRSYMS
+# ifdef USE_DRSYMS
         char buf[128];
         size_t sofar = 0;
         ssize_t len;
+# endif
 #endif
         IF_DEBUG(bool ok;)
         mc.size = sizeof(mc);
@@ -574,21 +595,25 @@ event_thread_init(void *drcontext)
         IF_DEBUG(ok = )
             dr_get_mcontext(drcontext, &mc);
         ASSERT(ok, "unable to get mcontext for new thread");
+#ifdef WINDOWS
         start_addr = (app_pc) IF_X64_ELSE(mc.rcx, mc.eax);
-#ifdef USE_DRSYMS
+# ifdef USE_DRSYMS
         BUFPRINT(buf, BUFFER_SIZE_ELEMENTS(buf), sofar, len,
                  "Thread #%d @", local_count);
         print_timestamp_elapsed(buf, BUFFER_SIZE_ELEMENTS(buf), &sofar);
-# ifdef STATISTICS
+#  ifdef STATISTICS
         BUFPRINT(buf, BUFFER_SIZE_ELEMENTS(buf), sofar, len, " #bbs=%d", num_bbs);
-# endif
+#  endif
         BUFPRINT(buf, BUFFER_SIZE_ELEMENTS(buf), sofar, len,
                  " start="PFX" ", start_addr);
         print_symbol(start_addr, buf, BUFFER_SIZE_ELEMENTS(buf), &sofar,
                      true, PRINT_SYMBOL_OFFSETS);
         LOG(1, "%s\n", buf);
-#else
+# else
         LOG(1, "New thread #%d: start addr "PFX"\n", local_count, start_addr);
+# endif
+#else
+        LOG(1, "New thread #%d\n", local_count);
 #endif
     }
 
@@ -1664,7 +1689,7 @@ event_module_load(void *drcontext, const module_data_t *info, bool loaded)
     alloc_module_load(drcontext, info, loaded);
     if (options.perturb_only)
         perturb_module_load(drcontext, info, loaded);
-    readwrite_module_load(drcontext, info, loaded);
+    slowpath_module_load(drcontext, info, loaded);
     leak_module_load(drcontext, info, loaded);
 #ifdef USE_DRSYMS
     /* Free resources.  Many modules will never need symbol queries again b/c
@@ -1684,7 +1709,7 @@ event_module_unload(void *drcontext, const module_data_t *info)
         dr_module_preferred_name(info) == NULL ? "<null>" :
         dr_module_preferred_name(info), info->start, info->end);
     leak_module_unload(drcontext, info);
-    readwrite_module_unload(drcontext, info);
+    slowpath_module_unload(drcontext, info);
     if (!options.perturb_only)
         callstack_module_unload(drcontext, info);
     if (INSTRUMENT_MEMREFS())
@@ -1807,6 +1832,17 @@ dr_init(client_id_t id)
         NOTIFY("WARNING: Dr. Memory for Mac is Beta software.  Please report any"NL);
         NOTIFY("problems encountered to http://drmemory.org/issues."NL);
 #endif
+#ifdef X64
+        /* i#111: full mode not ported yet to 64-bit */
+        if (options.pattern == 0)
+            NOTIFY("WARNING: 64-bit non-pattern modes are experimental"NL);
+#endif
+#if defined(X64) || defined(ARM)
+        /* i#111/i#1726: full mode not ported yet to 64-bit/ARM */
+        if (!option_specified.pattern && !option_specified.light)
+            NOTIFY("(Uninitialized read checking is not yet supported for "
+                   IF_X64_ELSE("64-bit","ARM") ")"NL);
+#endif
     }
 # ifdef WINDOWS
     if (options.summary)
@@ -1877,6 +1913,9 @@ dr_init(client_id_t id)
         shadow_init();
     }
 
+    if (options.fuzz)
+        fuzzer_init(client_id);
+
     if (options.pattern != 0)
         pattern_init();
 
@@ -1935,4 +1974,10 @@ dr_init(client_id_t id)
         perturb_init();
 
     instrument_init();
+
+    if (options.coverage) {
+        drcovlib_options_t ops = {sizeof(ops), 0, logsubdir, };
+        if (drcovlib_init(&ops) != DRCOVLIB_SUCCESS)
+            ASSERT(false, "failed to init drcovlib");
+    }
 }

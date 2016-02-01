@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -144,7 +144,7 @@ is_using_sysenter(void)
 bool
 is_using_sysint(void)
 {
-    return (syscall_gateway == DRSYS_GATEWAY_INT);
+    return (syscall_gateway == DRSYS_GATEWAY_INT || syscall_gateway == DRSYS_GATEWAY_SVC);
 }
 
 #ifdef WINDOWS
@@ -158,6 +158,7 @@ is_using_wow64(void)
 static void
 check_syscall_gateway(instr_t *inst)
 {
+#ifdef X86
     if (instr_get_opcode(inst) == OP_sysenter) {
         if (syscall_gateway == DRSYS_GATEWAY_UNKNOWN
             /* some syscalls use int, but consider sysenter the primary */
@@ -185,6 +186,15 @@ check_syscall_gateway(instr_t *inst)
                             || syscall_gateway == DRSYS_GATEWAY_SYSCALL),
                    "multiple system call gateways not supported");
         }
+#elif defined(ARM)
+    if (instr_get_opcode(inst) == OP_svc) {
+        if (syscall_gateway == DRSYS_GATEWAY_UNKNOWN)
+            syscall_gateway = DRSYS_GATEWAY_SVC;
+        else {
+            ASSERT(syscall_gateway == DRSYS_GATEWAY_SVC,
+                   "multiple system call gateways not supported");
+        }
+#endif
 #ifdef WINDOWS
     } else if (instr_is_wow64_syscall(inst)) {
         if (syscall_gateway == DRSYS_GATEWAY_UNKNOWN)
@@ -238,9 +248,12 @@ drsys_name_to_syscall(const char *name, drsys_syscall_t **syscall OUT)
         return DRMF_ERROR_NOT_FOUND;
     }
 #ifdef DEBUG
-    ASSERT(stri_eq(sysinfo->name, name) ||
-           /* account for NtUser*, etc. prefix differences */
-           strcasestr(sysinfo->name, name) != NULL , "name<->num mismatch");
+    ASSERT(stri_eq(sysinfo->name, name)
+           IF_WINDOWS(||
+                      /* account for NtUser*, etc. prefix differences, but only on
+                       * Windows b/c strcasestr's tolower is undef on Linux
+                       */
+                      strcasestr(sysinfo->name, name) != NULL), "name<->num mismatch");
 #endif
     *syscall = (drsys_syscall_t *) sysinfo;
     return DRMF_SUCCESS;
@@ -614,7 +627,7 @@ drsys_syscall_succeeded(drsys_syscall_t *syscall, reg_t result, bool *success OU
     memset(&pt, 0, sizeof(pt));
     if (syscall == NULL || success == NULL)
         return DRMF_ERROR_INVALID_PARAMETER;
-    pt.mc.xax = result;
+    pt.mc.IF_ARM_ELSE(r0,xax) = result;
     *success = os_syscall_succeeded(sysinfo->num, sysinfo, &pt);
     return DRMF_SUCCESS;
 #endif
@@ -630,13 +643,14 @@ get_syscall_result(syscall_info_t *sysinfo, cls_syscall_t *pt,
         *success = res;
     if (value != NULL) {
 #ifdef X64
-        *value = mc->rax;
+        *value = mc->IF_ARM_ELSE(r0,rax);
 #else
         /* yes, reg_t is unsigned so we have no sign-extension here */
         if (TEST(SYSINFO_RET_64BIT, sysinfo->flags))
-            *value = (uint64)mc->eax | ((uint64)mc->edx << 32);
+            *value = (uint64)mc->IF_ARM_ELSE(r0,eax) |
+                ((uint64)mc->IF_ARM_ELSE(r1,edx) << 32);
         else
-            *value = (uint64)mc->eax;
+            *value = (uint64)mc->IF_ARM_ELSE(r0,eax);
 #endif
     }
     if (error_code != NULL) {
@@ -644,7 +658,7 @@ get_syscall_result(syscall_info_t *sysinfo, cls_syscall_t *pt,
             *error_code = 0;
         else {
 #ifdef LINUX
-            *error_code = (uint)-(int)mc->xax;
+            *error_code = (uint)-(int)mc->IF_ARM_ELSE(r0,xax);
 #else
             *error_code = (uint)mc->xax;
 #endif
@@ -1200,6 +1214,13 @@ handle_sockaddr(cls_syscall_t *pt, sysarg_iter_info_t *ii, byte *ptr,
  * General syscall arg processing
  */
 
+/* We use this sentinel value for C string params.  We want a non-zero value
+ * to indicate the param is present, but we want to pass 0 to handle_cstring().
+ * We need the non-zero value to be large enough to avoid triggering the
+ * truncation check vs sysarg_known_sz.
+ */
+#define SIZE_DYNAMIC (ptr_uint_t)-1
+
 /* assumes pt->sysarg[] has already been filled in */
 static ptr_uint_t
 sysarg_get_size(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *ii,
@@ -1207,7 +1228,10 @@ sysarg_get_size(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *ii,
 {
     ptr_uint_t size = 0;
     sysinfo_arg_t *arg = &sysinfo->arg[argnum];
-    if (arg->size == SYSARG_POST_SIZE_RETVAL) {
+    if (arg->size == 0 && TEST(SYSARG_COMPLEX_TYPE, arg->flags) &&
+        arg->misc == SYSARG_TYPE_CSTRING) {
+        return SIZE_DYNAMIC; /* we'll figure out size later */
+    } else if (arg->size == SYSARG_POST_SIZE_RETVAL) {
         /* XXX: some syscalls (in particular NtGdi* and NtUser*) return
          * the capacity needed when the input buffer is NULL or
          * size of input buffer is given as 0.  For the buffer being NULL
@@ -1399,8 +1423,9 @@ process_pre_syscall_reads_and_writes(cls_syscall_t *pt, sysarg_iter_info_t *ii)
          * we should check here since harder to undo post-syscall on failure.
          */
         if (start != NULL && size > 0) {
+            size_t real_sz = (size == SIZE_DYNAMIC) ? 0 : size;
             bool skip = os_handle_pre_syscall_arg_access(ii, &sysinfo->arg[i],
-                                                         start, size);
+                                                         start, real_sz);
             if (ii->abort)
                 break;
             /* i#502-c#5, i#1169: some arg should be ignored if another arg is NULL */
@@ -1419,7 +1444,7 @@ process_pre_syscall_reads_and_writes(cls_syscall_t *pt, sysarg_iter_info_t *ii)
                        "message buffer too small");
                 NULL_TERMINATE_BUFFER(idmsg);
 
-                if (!report_memarg_nonfield(ii, &sysinfo->arg[i], start, size, idmsg))
+                if (!report_memarg_nonfield(ii, &sysinfo->arg[i], start, real_sz, idmsg))
                     break;
             }
         }

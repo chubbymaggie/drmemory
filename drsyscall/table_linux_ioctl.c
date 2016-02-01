@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -36,7 +36,7 @@
 /* The name of the ioctl is "ioctl.name".  To avoid long lines from repeating
  * the request name we wrap it in a macro.
  */
-#define IOCTL(request) {PACKNUM(16,54), request}, "ioctl." STRINGIFY(request)
+#define IOCTL(request) {PACKNUM(16,54,54), request}, "ioctl." STRINGIFY(request)
 
 /* All ioctls take fd and request as the first two args. */
 #define FD_REQ \
@@ -338,12 +338,14 @@ syscall_info_t syscall_ioctl_info[] = {
     {IOCTL(SIOCGETSGCNT), OK, RLONG, 3, {FD_REQ, {2, sizeof(struct sioc_sg_req), R|W}}},
 #endif
 
+#ifndef ANDROID
     // <include/linux/mtio.h>
     {IOCTL(MTIOCTOP), OK, RLONG, 3, {FD_REQ, {2, sizeof(struct mtop), R}}},
     {IOCTL(MTIOCGET), OK, RLONG, 3, {FD_REQ, {2, sizeof(struct mtget), W}}},
     {IOCTL(MTIOCPOS), OK, RLONG, 3, {FD_REQ, {2, sizeof(struct mtpos), W}}},
     {IOCTL(MTIOCGETCONFIG), OK, RLONG, 3, {FD_REQ, {2, sizeof(struct mtconfiginfo), W}}},
     {IOCTL(MTIOCSETCONFIG), OK, RLONG, 3, {FD_REQ, {2, sizeof(struct mtconfiginfo), R}}},
+#endif
 
 #if 0 /* FIXME: define not in my headers */
     // <include/linux/netrom.h>

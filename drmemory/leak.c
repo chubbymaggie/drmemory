@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2015 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -723,7 +723,7 @@ is_midchunk_pointer_legitimate(byte *pointer, byte *chunk_start, byte *chunk_end
     }
     /* PR 535344: remove std::string instances from possible leak category */
     if (op_midchunk_string_ok) {
-        /* A std::string object points at a heap-allocate instance of its internal
+        /* A std::string object points at a heap-allocated instance of its internal
          * representation where the stored pointer is to the char array after 3
          * header fields (length, capacity, refcount).
          */
@@ -734,8 +734,11 @@ is_midchunk_pointer_legitimate(byte *pointer, byte *chunk_start, byte *chunk_end
             LOG(4, "\tstring length="PIFX", capacity="PIFX", alloc="PIFX"\n",
                 length, capacity, chunk_end - chunk_start);
             if (length <= capacity &&
-                (capacity + 1/*null-terminated*/ + 3*sizeof(size_t)/*3 header fields*/
-                 == (chunk_end - chunk_start))) {
+                ((capacity + 1/*null-terminated*/ + 3*sizeof(size_t)/*3 header fields*/
+                  == (chunk_end - chunk_start)) ||
+                 /* Wide 2-byte characters (i#1814) */
+                 ((capacity + 1/*null*/)*2 + 3*sizeof(size_t)/*3 header fields*/
+                  == (chunk_end - chunk_start)))) {
                 /* could also check for no nulls in char[] until length */
                 LOG(3, "\tmid-chunk "PFX" is std::string => ok\n", pointer);
                 STATS_INC(midchunk_string_ptrs);
@@ -1095,6 +1098,12 @@ check_reachability_helper(byte *start, byte *end, bool skip_heap,
                 /* skip private heap: here we assume it's a single segment */
                 (pc == (byte *) get_private_heap_handle()) ||
 #endif
+#ifdef LINUX
+                /* i#1778: skip vvar page to avoid kernel soft lockups.
+                 * This skips vdso as well but we're already doing that b/c it's +rx.
+                 */
+                TEST(DR_MEMPROT_VDSO, info.prot) ||
+#endif
                 /* don't count references in DR data */
                 dr_memory_is_dr_internal(pc) ||
                 /* don't count references in DrMem data (e.g., report.c's
@@ -1145,24 +1154,21 @@ check_reachability_helper(byte *start, byte *end, bool skip_heap,
                 }
             }
             /* Now pc points to an aligned and defined (non-heap) ptrsz bytes */
-            /* FIXME PR 475518: improve performance of all these reads and table
+            /* XXX PR 475518: improve performance of all these reads and table
              * lookups: this scan is where the noticeable pause at exit comes
              * from, not the identification of defined regions.
              */
-#ifdef VMX86_SERVER /* really should be !HAVE_PROC_MAPS */
-            if (!op_have_defined_info) {
-                /* memory query is unreliable, and we don't have definedness
-                 * info, so we can and have crashed here
-                 */
-                if (safe_read(pc, sizeof(pointer), &pointer))
-                    check_reachability_pointer(pointer, pc, defined_end, data);
-            } else  {
-#endif
-                /* Threads are suspended and we checked readability so safe to deref */
-                pointer = *((app_pc*)pc);
+#ifdef UNIX
+            /* i#1773: we could hit a bus error even on a readable page.  Also
+             * on some UNIX platforms like VMX86_SERVER we do not have a
+             * reliable memory query.
+             */
+            if (leak_safe_read_heap(pc, (void **)&pointer))
                 check_reachability_pointer(pointer, pc, defined_end, data);
-#ifdef VMX86_SERVER /* really should be !HAVE_PROC_MAPS */
-            }
+#else
+            /* Threads are suspended and we checked readability so safe to deref */
+            pointer = *((app_pc*)pc);
+            check_reachability_pointer(pointer, pc, defined_end, data);
 #endif
         }
         pc = (byte *) ALIGN_FORWARD(defined_end, sizeof(void*));
@@ -1190,7 +1196,8 @@ check_reachability_regs(void *drcontext, dr_mcontext_t *mc, reachability_data_t 
         }
     }
     /* we ignore fp/mmx and xmm regs */
-    for (reg = REG_START_32; reg <= REG_EDI/*STOP_32 is R15D!*/; reg++) {
+    for (reg = REG_START_32; reg <= IF_X86_ELSE(REG_EDI/*STOP_32 is R15D!*/, REG_STOP_32);
+         reg++) {
         if (!op_have_defined_info || cb_is_register_defined(drcontext, reg)) {
             reg_t val = reg_get_value(reg, mc);
             LOG(4, "thread "TIDFMT" reg %d: "PFX"\n", dr_get_thread_id(drcontext),
@@ -1347,7 +1354,9 @@ leak_scan_for_leaks(bool at_exit)
     mc.size = sizeof(mc);
     mc.flags = DR_MC_CONTROL|DR_MC_INTEGER; /* don't need xmm */
 
-#ifndef MACOS /* XXX: no private loader yet */
+    /* XXX: no MacOS private loader yet */
+    /* ARM is always in app state */
+#if !defined(MACOS) && !defined(ARM)
     /* i#1016: ensure the thread performing the leak scan is in DR state,
      * which should be the case regardless of whether at exit or a nudge.
      */

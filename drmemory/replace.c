@@ -98,6 +98,7 @@
     REPLACE_DEF(stpcpy, NULL)      \
     REPLACE_DEF(strstr, "wcsstr")  \
     REPLACE_DEF(wcsstr, NULL)      \
+    IF_UNIX(REPLACE_DEF(bzero, NULL)) \
     IF_MACOS(REPLACE_NAME_DEF(_platform_memchr, memchr, NULL)) \
     IF_MACOS(REPLACE_NAME_DEF(_platform_memcmp, memcmp, NULL)) \
     IF_MACOS(REPLACE_NAME_DEF(_platform_memmove, memmove, NULL)) \
@@ -105,7 +106,8 @@
     IF_MACOS(REPLACE_NAME_DEF(_platform_strchr, strchr, NULL)) \
     IF_MACOS(REPLACE_NAME_DEF(_platform_strcmp, strcmp, NULL)) \
     IF_MACOS(REPLACE_NAME_DEF(_platform_strncmp, strncmp, NULL)) \
-    IF_MACOS(REPLACE_NAME_DEF(_platform_strlen, strlen, NULL))
+    IF_MACOS(REPLACE_NAME_DEF(_platform_strlen, strlen, NULL)) \
+    IF_MACOS(REPLACE_NAME_DEF(_platform_bzero, bzero, NULL))
 
 /* XXX i#350: add wrappers for wcsncpy, wcscat,
  * wcsncat, wmemmove.
@@ -136,9 +138,6 @@ typedef struct _sym_enum_data_t {
     bool add;
     bool processed[REPLACE_NUM];
     app_pc indirect[REPLACE_NUM];
-# ifdef DEBUG
-    bool processed_some[REPLACE_NUM];
-# endif
     const module_data_t *mod;
 } sym_enum_data_t;
 
@@ -170,8 +169,8 @@ asm(".section __TEXT,__replace");
 asm(".align 12"); /* 2^12 */
 # define IN_REPLACE_SECTION __attribute__ ((section ("__TEXT,__replace")))
 #elif defined(LINUX)
-asm(".section .replace, \"ax\", @progbits");
-asm(".align 0x1000");
+asm(".section .replace, \"ax\", " IF_X86_ELSE("@progbits","%progbits"));
+asm(".align " IF_X86_ELSE("0x1000","12"));
 # define IN_REPLACE_SECTION __attribute__ ((section (".replace")))
 #else /* WINDOWS */
 ACTUAL_PRAGMA( code_seg(".replace") )
@@ -213,6 +212,14 @@ replace_wmemset(wchar_t *dst, wchar_t val_in, size_t size)
     return ret;
 }
 END_DO_NOT_OPTIMIZE
+
+DO_NOT_OPTIMIZE
+
+IN_REPLACE_SECTION void
+replace_bzero(void *dst, size_t size)
+{
+    replace_memset(dst, 0, size);
+}
 
 IN_REPLACE_SECTION void *
 replace_memcpy(void *dst, const void *src, size_t size)
@@ -705,7 +712,7 @@ replace_wcsstr(const wchar_t *haystack, const wchar_t *needle)
     if (*n == '\0')
         return (wchar_t *) haystack;
     while (*hs != '\0') {
-        if (*hs != *n) {
+        if (*hs != *n && n > needle) {
             hs -= n - 1 - needle; /* backtrack */
             n = needle;
         }
@@ -825,8 +832,8 @@ asm(".section __TEXT,.text");
 asm(".align 12");
 asm(".text");
 #elif defined(LINUX)
-asm(".section .text, \"ax\", @progbits");
-asm(".align 0x1000");
+asm(".section .text, \"ax\", " IF_X86_ELSE("@progbits","%progbits"));
+asm(".align " IF_X86_ELSE("0x1000","12"));
 #else
 ACTUAL_PRAGMA( code_seg() )
 #endif
@@ -939,7 +946,7 @@ cast_to_func(void *p)
 
 static void
 replace_routine(bool add, const module_data_t *mod,
-                app_pc addr, int index _IF_DEBUG(bool sym_processed_once))
+                app_pc addr, int index)
 {
     IF_DEBUG(const char *modname = dr_module_preferred_name(mod);)
     /* look for partial map (i#730) */
@@ -971,10 +978,10 @@ replace_routine(bool add, const module_data_t *mod,
             ASSERT(false, "failed to replace");
     } else {
         if (!drwrap_replace((app_pc)addr, NULL, true)) {
-            /* Suppress assert if we've already removed at least one instance
-             * of this symbol (i#1200)
+            /* We can't easily assert b/c we may have already removed an instance
+             * of this symbol (i#1200) or even of a different symbol with the
+             * same address (i#1818).
              */
-            ASSERT(sym_processed_once || false, "failed to un-replace");
         }
     }
 }
@@ -1025,22 +1032,23 @@ static void
 replace_all_indirect(bool add, const module_data_t *mod,
                      int index, app_pc indir, app_pc resolved)
 {
+#ifdef X86
     void *drcontext = dr_get_current_drcontext();
     instr_t inst;
     app_pc pc = indir;
-#if !defined(X64) || defined(DEBUG)
+# if !defined(X64) || defined(DEBUG)
     app_pc prev_pc;
-#endif
-#ifndef X64
+# endif
+# ifndef X64
     bool last_was_call = false, first_call = false;
     app_pc addr_got = NULL;
-#endif
+# endif
     instr_init(drcontext, &inst);
     do {
         instr_reset(drcontext, &inst);
-#if !defined(X64) || defined(DEBUG)
+# if !defined(X64) || defined(DEBUG)
         prev_pc = pc;
-#endif
+# endif
         /* look for partial map (i#730) */
         if (!dr_module_contains_addr(mod, pc + MAX_INSTR_SIZE)) {
             WARN("WARNING: decoding off end of module for %s\n",
@@ -1054,7 +1062,7 @@ replace_all_indirect(bool add, const module_data_t *mod,
                 replace_routine_name[index], prev_pc);
             break;
         }
-#ifndef X64
+# ifndef X64
         if (last_was_call) {
             /* At instr after call to thunk: should be add of immed to ebx */
             first_call = true;
@@ -1086,11 +1094,11 @@ replace_all_indirect(bool add, const module_data_t *mod,
                 break;
             }
             if (addr != resolved)
-                replace_routine(add, mod, addr, index _IF_DEBUG(false));
+                replace_routine(add, mod, addr, index);
         }
         if (!first_call && instr_is_call_direct(&inst))
             last_was_call = true;
-#else
+# else
         if (instr_get_opcode(&inst) == OP_lea &&
             opnd_get_reg(instr_get_dst(&inst, 0)) == REG_XAX &&
             opnd_is_rel_addr(instr_get_src(&inst, 0))) {
@@ -1103,12 +1111,15 @@ replace_all_indirect(bool add, const module_data_t *mod,
                 break;
             }
             if (addr != resolved)
-                replace_routine(add, mod, addr, index _IF_DEBUG(false));
+                replace_routine(add, mod, addr, index);
         }
-#endif
+# endif
     } while (!instr_is_return(&inst));
     instr_reset(drcontext, &inst);
-
+#elif defined(ARM)
+    /* NYI: our current ARM targets do not have indirected routines in glibc. */
+    ASSERT_NOT_IMPLEMENTED();
+#endif
 }
 
 #ifdef USE_DRSYMS
@@ -1189,8 +1200,7 @@ enumerate_syms_cb(drsym_info_t *info, drsym_error_t status, void *data)
             /* i#1710: do not replace indirected top-level object */
             edata->mod->start + modoffs != edata->indirect[i-1]) {
             i--;
-            replace_routine(edata->add, edata->mod, edata->mod->start + modoffs, i
-                            _IF_DEBUG(edata->processed_some[i]));
+            replace_routine(edata->add, edata->mod, edata->mod->start + modoffs, i);
         }
     }
     return true; /* keep iterating */
@@ -1260,7 +1270,7 @@ replace_in_module(const module_data_t *mod, bool add)
     app_pc libc = get_libc_base(NULL);
     void *drcontext = dr_get_current_drcontext();
 #ifdef USE_DRSYMS
-    sym_enum_data_t edata = {add, {0,}, {0} _IF_DEBUG({0}), mod};
+    sym_enum_data_t edata = {add, {0,}, {0}, mod};
     bool missing_entry = false;
 #endif
 #ifdef DEBUG
@@ -1348,13 +1358,19 @@ replace_in_module(const module_data_t *mod, bool add)
             }
         }
         if (addr != NULL) {
-            replace_routine(add, mod, addr, i _IF_DEBUG(false));
-            IF_DEBUG(edata.processed_some[i] = true;)
+            replace_routine(add, mod, addr, i);
         } else {
             /* We should find every single routine in libc on linux: on windows
              * the wide-char ones aren't always there
              */
-            IF_UNIX(ASSERT(mod->start != libc, "can't find libc routine to replace"));
+            IF_UNIX(ASSERT(mod->start != libc ||
+                           /* i#1747: bionic libc does not have all replace routines.
+                            * We could add a generated array of whether the routine is
+                            * expected to be there instead if more routines are missing.
+                            */
+                           (strcmp(replace_routine_name[i], "rawmemchr") == 0 ||
+                            strcmp(replace_routine_name[i], "strchrnul") == 0),
+                           "can't find libc routine to replace"));
         }
     }
 
@@ -1378,11 +1394,9 @@ replace_in_module(const module_data_t *mod, bool add)
                               &modoffs, &count, &single) == DRMF_SUCCESS) {
             STATS_INC(symbol_search_cache_hits);
             edata.processed[i] = true;
-            IF_DEBUG(edata.processed_some[i] = true);
             for (idx = 0; idx < count; idx++) {
                 if (modoffs[idx] != 0) {
-                    replace_routine(add, mod, mod->start + modoffs[idx], i
-                                    _IF_DEBUG(edata.processed_some[i]));
+                    replace_routine(add, mod, mod->start + modoffs[idx], i);
                 }
             }
             drsymcache_free_lookup(modoffs, count);

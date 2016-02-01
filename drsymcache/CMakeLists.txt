@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2012-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2012-2015 Google, Inc.  All rights reserved.
 # **********************************************************
 
 # Dr. Memory: the memory debugger
@@ -71,9 +71,8 @@ macro(export_drsymcache_target target drmgr drsyms)
   # We need to clear the dependents that come from DR to avoid the prefix
   # from affecting them too.
   set_target_properties(${target} PROPERTIES LINK_INTERFACE_LIBRARIES "")
-  # We use a prefix internally to test the imported targets.
-  export_target(${target} NAMESPACE drmf_)
-  # Now put in our imports w/o the namespace on them
+  export_target(${target})
+  # Now put in our imports (w/o any namespace)
   set_target_properties(${target} PROPERTIES
     LINK_INTERFACE_LIBRARIES "dynamorio;${drmgr}")
   install(TARGETS ${target} EXPORT ${exported_targets_name}
@@ -100,6 +99,7 @@ install(FILES drsymcache.h DESTINATION ${DRMF_INSTALL_INC})
 add_library(drsymcache_static STATIC ${srcs_static} ${external_srcs})
 configure_DynamoRIO_client(drsymcache_static)
 configure_drsymcache_target(drsymcache_static "drmgr_static" "drsyms_static")
+add_static_lib_debug_info(drsymcache_static ${DRMF_INSTALL_BIN})
 export_drsymcache_target(drsymcache_static "drmgr_static" "drsyms_static")
 
 # We build a separate static target for internal use that has our

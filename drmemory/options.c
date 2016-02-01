@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -106,16 +106,19 @@ enum {
     TYPE_IS_BOOL_opstring_t = false,
     TYPE_IS_BOOL_multi_opstring_t = false,
     TYPE_IS_BOOL_uint       = false,
+    TYPE_IS_BOOL_uint64     = false,
     TYPE_IS_BOOL_int        = false,
     TYPE_IS_STRING_bool       = false,
     TYPE_IS_STRING_opstring_t = true,
     TYPE_IS_STRING_multi_opstring_t = false,
     TYPE_IS_STRING_uint       = false,
+    TYPE_IS_STRING_uint64     = false,
     TYPE_IS_STRING_int        = false,
     TYPE_HAS_RANGE_bool       = false,
     TYPE_HAS_RANGE_opstring_t = false,
     TYPE_HAS_RANGE_multi_opstring_t = false,
     TYPE_HAS_RANGE_uint       = true,
+    TYPE_HAS_RANGE_uint64     = true,
     TYPE_HAS_RANGE_int        = true,
 };
 
@@ -193,8 +196,29 @@ option_error(const char *whichop, const char *msg)
 }
 
 static inline const char *
+option_read_uint64(const char *s, char *word, void *var_in /* really uint64* */,
+                   const char *opname, uint64 minval, uint64 maxval)
+{
+    uint64 *var = (uint64 *) var_in;
+    ASSERT(s != NULL && word != NULL && var != NULL && opname != NULL, "invalid param");
+    s = get_option_word(s, word);
+    if (s == NULL || word[0] == '\0')
+        option_error(opname, "missing value");
+    /* %u allows negative so we explicitly check */
+    if (word[0] == '-')
+        option_error(opname, "negative value not allowed");
+    /* allow hex: must read it first, else 0 in 0x will be taken */
+    if (dr_sscanf(word, "0x" HEX64_FORMAT_STRING, var) != 1 &&
+        dr_sscanf(word, UINT64_FORMAT_STRING, var) != 1)
+        option_error(opname, "invalid unsigned 64-bit integer");
+    if (*var < minval || *var > maxval)
+        option_error(opname, "value is outside allowed range");
+    return s;
+}
+
+static inline const char *
 option_read_uint(const char *s, char *word, void *var_in /* really uint* */,
-                 const char *opname, uint minval, uint maxval)
+                 const char *opname, uint minval, uint64 maxval)
 {
     uint *var = (uint *) var_in;
     ASSERT(s != NULL && word != NULL && var != NULL && opname != NULL, "invalid param");
@@ -215,7 +239,7 @@ option_read_uint(const char *s, char *word, void *var_in /* really uint* */,
 
 static inline const char *
 option_read_int(const char *s, char *word, void *var_in /* really int* */,
-                const char *opname, int minval, int maxval)
+                const char *opname, int minval, int64 maxval)
 {
     int *var = (int *) var_in;
     ASSERT(s != NULL && word != NULL && var != NULL && opname != NULL, "invalid param");
@@ -233,7 +257,7 @@ option_read_int(const char *s, char *word, void *var_in /* really int* */,
 
 static inline const char *
 option_read_opstring_t(const char *s, char *word, void *var_in /* really opstring_t* */,
-                       const char *opname, /*ignored: */int minval, int maxval)
+                       const char *opname, /*ignored: */int minval, uint64 maxval)
 {
     opstring_t *var = (opstring_t *) var_in;
     const char *pre_s = s;
@@ -255,7 +279,7 @@ option_read_opstring_t(const char *s, char *word, void *var_in /* really opstrin
 static inline const char *
 option_read_multi_opstring_t(const char *s, char *word,
                              void *var_in /* really multi_opstring_t* */,
-                             const char *opname, /*ignored: */int minval, int maxval)
+                             const char *opname, /*ignored: */int minval, uint64 maxval)
 {
     multi_opstring_t *var = (multi_opstring_t *) var_in;
     char *c;
@@ -275,7 +299,7 @@ option_read_multi_opstring_t(const char *s, char *word,
 
 static inline const char *
 option_read_bool(const char *s, char *word, void *var_in /* really bool* */,
-                 const char *opname, int minval/*really bool*/, int maxval/*ignored*/)
+                 const char *opname, int minval/*really bool*/, uint64 maxval/*ignored*/)
 {
     bool *var = (bool *) var_in;
     *var = (bool) minval;
@@ -307,12 +331,12 @@ options_init(const char *opstr)
             if (stri_eq(word, "-"#name)) {                              \
                 option_specified.name = true;                           \
                 s = option_read_bool(s, NULL, (void *)&options.name,    \
-                                     "-"#name, true, max);              \
+                                     "-"#name, true, 0);                \
                 continue; /* match found */                             \
             } else if (stri_eq(word, "-no_"#name)) {                    \
                 option_specified.name = true;                           \
                 s = option_read_bool(s, NULL, (void *)&options.name,    \
-                                     "-"#name, false, max);             \
+                                     "-"#name, false, 0);               \
                 continue; /* match found */                             \
             }                                                           \
         } else if (stri_eq(word, "-"#name)) {                           \
@@ -486,7 +510,9 @@ options_init(const char *opstr)
             usage_error("redzone size must be pointer-size-aligned non-zero"
                         " in pattern mode", "");
         }
-        /* we use two-byte pattern */
+        /* we use a two-byte pattern */
+        if ((options.pattern & 0xffff0000) != 0)
+            usage_error("pattern must be a 2-byte value", "");
         options.pattern |= options.pattern << 16;
         /* no unknown syscalls analysis */
         options.analyze_unknown_syscalls = false;
@@ -504,6 +530,53 @@ options_init(const char *opstr)
             usage_error("-handle_leaks_only cannot be used with pattern mode", "");
 # endif
     }
+    if (option_specified.fuzz ||
+        option_specified.fuzz_module ||
+        option_specified.fuzz_function ||
+        option_specified.fuzz_offset ||
+        option_specified.fuzz_num_args ||
+        option_specified.fuzz_data_idx ||
+        option_specified.fuzz_size_idx ||
+        option_specified.fuzz_num_iters ||
+        option_specified.fuzz_replace_buffer ||
+        option_specified.fuzz_call_convention ||
+        option_specified.fuzz_dump_on_error ||
+        option_specified.fuzz_input_file ||
+        option_specified.fuzz_corpus ||
+        option_specified.fuzz_corpus_out ||
+        option_specified.fuzz_bbcov ||
+        option_specified.fuzz_target ||
+        option_specified.fuzz_mutator_lib ||
+        option_specified.fuzz_mutator_ops ||
+        option_specified.fuzz_mutator_alg ||
+        option_specified.fuzz_mutator_unit ||
+        option_specified.fuzz_mutator_flags ||
+        option_specified.fuzz_mutator_sparsity ||
+        option_specified.fuzz_mutator_max_value ||
+        option_specified.fuzz_mutator_random_seed ||
+        option_specified.fuzz_dictionary ||
+        option_specified.fuzz_one_input ||
+        option_specified.fuzz_buffer_fixed_size ||
+        option_specified.fuzz_buffer_offset ||
+        option_specified.fuzz_skip_initial ||
+        IF_WINDOWS(option_specified.fuzz_mangled_names ||)
+        option_specified.fuzz_stat_freq) {
+        options.fuzz = true;
+        /* enable replace_buffer by default if fuzzing with input files */
+        if ((option_specified.fuzz_corpus || option_specified.fuzz_input_file) &&
+            !option_specified.fuzz_replace_buffer)
+            options.fuzz_replace_buffer = true;
+        if (options.fuzz_replace_buffer && !options.replace_malloc) {
+            usage_error("-fuzz_replace_buffer cannot be used with -no_replace_malloc",
+                        "");
+        }
+        if (option_specified.fuzz_dictionary && option_specified.fuzz_mutator_unit &&
+            strcmp(options.fuzz_mutator_unit, "token") != 0)
+            usage_error("-fuzz_dictionary requires -fuzz_mutator_unit token", "");
+        if (option_specified.fuzz_corpus_out && !option_specified.fuzz_corpus)
+            usage_error("-fuzz_corpus_out requires -fuzz_corpus", "");
+    }
+
     if (options.replace_malloc) {
         options.replace_realloc = false; /* no need for it */
         /* whole header is in redzone, but supports redzone being smaller than header */
@@ -593,15 +666,14 @@ options_init(const char *opstr)
         if (!option_specified.callstack_use_top_fp && !HAVE_STALE_RETADDRS())
             options.callstack_use_top_fp = false;
     }
-# ifdef X64
-    if (options.pattern == 0)
-        NOTIFY("WARNING: 64-bit non-pattern modes are experimental"NL);
-# endif
     if (!options.callstack_use_fp)
         options.callstack_use_top_fp = false;
     if (options.persist_code && !persistence_supported())
         usage_error("currently -persist_code only supports -light or "
                     "-no_check_uninitialized", "");
+    /* N.B.: avoid any NOTIFY messages here as they will not honor -quiet: place them
+     * in dr_init() underneath the version printout.
+     */
 #endif /* TOOL_DR_MEMORY */
     if (options.native_until_thread > 0 || options.native_parent) {
         go_native = true;
@@ -615,8 +687,9 @@ options_print_usage()
 #define OPTION_CLIENT(scope, name, type, defval, min, max, short, long) \
     if (SCOPE_IS_PUBLIC_##scope) {                                      \
         if (TYPE_IS_BOOL_##type) { /* turn "(0)" into "false" */        \
+            type _tmp = defval; /* work around cl bogus integer overflow if in [] */ \
             NOTIFY_NO_PREFIX("  -%-28s [%6s]  %s"NL, #name,             \
-                             bool_string[(ptr_int_t)defval], short);    \
+                             bool_string[(ptr_int_t)_tmp], short);      \
             ASSERT((ptr_int_t)defval == 0 || (ptr_int_t)defval == 1,    \
                    "defval must be true/false");                        \
         } else if (TYPE_HAS_RANGE_##type)                               \

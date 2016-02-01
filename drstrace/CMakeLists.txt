@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2013-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2013-2015 Google, Inc.  All rights reserved.
 # **********************************************************
 
 # Dr. Memory: the memory debugger
@@ -19,6 +19,8 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 cmake_minimum_required(VERSION 2.6)
+
+include(${PROJECT_SOURCE_DIR}/make/policies.cmake NO_POLICY_SCOPE)
 
 find_package(DrMemoryFramework PATHS ${framework_dir})
 
@@ -60,15 +62,23 @@ configure_DynamoRIO_client(drstracelib)
 
 # We could link with the internal static lib but it's a good exercise
 # to test the public version:
-# While we seem to need the drmf_ prefix here for shared drsyscall, for static
-# that doesn't work while this does -- go figure:
-use_DynamoRIO_extension(drstracelib drsyscall_static)
-use_DynamoRIO_extension(drstracelib drmgr_static)
-use_DynamoRIO_extension(drstracelib drx_static)
 # XXX: We could use a dynamic drsyms, although drmemory is using static.
 # So we'd need special deployment here.
 use_DynamoRIO_extension(drstracelib drsyms_static)
+# While we seem to need the drmf_ prefix here for shared drsyscall, for static
+# that doesn't work while this does -- go figure (and we can't use drmf_ w/
+# cmake 3.+ anyway: i#1652):
+use_DynamoRIO_extension(drstracelib drsyscall_static)
+use_DynamoRIO_extension(drstracelib drmgr_static)
+use_DynamoRIO_extension(drstracelib drx_static)
 add_dependencies(drstracelib drsyscall)
+
+if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
+  # i#1805: to avoid strtol dup symbol errors (libcmt vs ntdll_imports) we just
+  # force the link.  Alternatives include splitting ntdll_imports into Nt+Rtl vs
+  # libc, dropping support for cmake < 3, or dropping non-Ninja support.
+  append_property_string(TARGET drstracelib LINK_FLAGS "/force:multiple")
+endif ()
 
 install(TARGETS drstracelib
   RUNTIME DESTINATION "${INSTALL_LIB}" # dll
@@ -158,21 +168,31 @@ if (WIN32)
   use_DynamoRIO_extension(drstrace_unit_tests drmgr_static)
   use_DynamoRIO_extension(drstrace_unit_tests drx_static)
   use_DynamoRIO_extension(drstrace_unit_tests drsyms_static)
-  # XXX DRi#1409/DRi#1503: we get link errors about dup symbols dr_get_stderr_file()
-  # in drdecode and dynamorio libs unless we link w/ drinjectlib.
-  target_link_libraries(drstrace_unit_tests drinjectlib drfrontendlib)
+  # XXX DRi#1409/DRi#1503/i#1805: we get link errors about dup symbols
+  # dr_get_stderr_file() in drdecode and dynamorio libs unless we link w/
+  # drinjectlib, and if we link w/ drinjectlib we get duplicate IR link errors
+  # w/ drdecode (i#1805).  We solve by moving drfrontendlib earlier via the link
+  # flags.
+  get_target_property(drfront_path drfrontendlib LOCATION${location_suffix})
+  append_property_string(TARGET drstrace_unit_tests LINK_FLAGS ${drfront_path})
+  add_dependencies(drstrace_unit_tests drfrontendlib)
   add_dependencies(drstrace_unit_tests drsyscall)
   add_test(drstrace_unit_tests
            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/drstrace_unit_tests")
   # We increase test timeout in case of slow Internet connection
   set_tests_properties(drstrace_unit_tests PROPERTIES TIMEOUT 120)
+
+  if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
+    # i#1805: avoid tolower dup symbol errors
+    append_property_string(TARGET drstrace_unit_tests LINK_FLAGS "/force:multiple")
+  endif ()
 endif (WIN32)
 
 ##################################################
 # drstrace test
 
 if (BUILD_TOOL_TESTS)
-  get_target_property(app_path drsyscall_test LOCATION${location_suffix})
+  get_target_property(app_path drsyscall_app LOCATION${location_suffix})
   get_target_property(drstrace_path drstrace LOCATION${location_suffix})
   add_test(drstrace ${drstrace_path} -dr ${DynamoRIO_DIR}/.. -- ${app_path})
 endif (BUILD_TOOL_TESTS)

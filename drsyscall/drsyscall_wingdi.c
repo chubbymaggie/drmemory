@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /* Dr. Memory: the memory debugger
@@ -44,6 +44,7 @@
 #include "../wininc/ndk_extypes.h" /* required by ntuser.h */
 #include "../wininc/ntuser.h"
 #include "../wininc/ntuser_win8.h"
+#include <commctrl.h> /* for EM_GETCUEBANNER */
 
 /***************************************************************************/
 /* System calls with wrappers in user32.dll.
@@ -77,62 +78,86 @@ static hashtable_t usercall_table;
 #define NONE -1
 
 static const char * const usercall_names[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   #type"."#name,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    #type"."#name,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 #define NUM_USERCALL_NAMES (sizeof(usercall_names)/sizeof(usercall_names[0]))
 
 static const char * const usercall_primary[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   #type,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    #type,
+#include "drsyscall_usercallx.h"
+#undef USERCALL
+};
+
+static const int win10_1511_usercall_nums[] = {
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w11,
+#include "drsyscall_usercallx.h"
+#undef USERCALL
+};
+
+static const int win10_usercall_nums[] = {
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w10,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int win81_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   w81,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w81,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int win8_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   w8,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w8,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int win7_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   w7,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w7,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int winvistaSP2_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   vistaSP2,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    vistaSP2,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int winvistaSP01_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   vistaSP01,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    vistaSP01,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int win2003_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   w2003,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w2003,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int winxp_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   xp,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    xp,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
 
 static const int win2k_usercall_nums[] = {
-#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81)   w2k,
+#define USERCALL(type, name, w2k, xp, w2003, vistaSP01, vistaSP2, w7, w8, w81, w10, w11) \
+    w2k,
 #include "drsyscall_usercallx.h"
 #undef USERCALL
 };
@@ -173,9 +198,11 @@ wingdi_get_secondary_syscall_num(const char *name, uint primary_num)
 
     /* add secondary usercall with & without primary prefix */
     name2num_entry_add(name, num, false/*no Zw*/);
-    skip_primary = strstr(name, "Param.");
-    if (skip_primary != NULL) {
-        name2num_entry_add(skip_primary + strlen("Param."), num, false/*no Zw*/);
+    skip_primary = strstr(name, ".");
+    if (skip_primary != NULL &&
+        /* don't add unknown w/o primary */
+        strstr(name, ".UNKNOWN") == NULL) {
+        name2num_entry_add(skip_primary + 1/*"."*/, num, false/*no Zw*/);
     }
     return num.secondary;
 }
@@ -188,9 +215,11 @@ drsyscall_wingdi_init(void *drcontext, app_pc ntdll_base, dr_os_version_info_t *
     LOG(1, "Windows version is %d.%d.%d\n", ver->version, ver->service_pack_major,
         ver->service_pack_minor);
     switch (ver->version) {
-    case DR_WINDOWS_VERSION_8_1:   usercalls = win81_usercall_nums;    break;
-    case DR_WINDOWS_VERSION_8:     usercalls = win8_usercall_nums;     break;
-    case DR_WINDOWS_VERSION_7:     usercalls = win7_usercall_nums;     break;
+    case DR_WINDOWS_VERSION_10_1511: usercalls = win10_1511_usercall_nums; break;
+    case DR_WINDOWS_VERSION_10:      usercalls = win10_usercall_nums;      break;
+    case DR_WINDOWS_VERSION_8_1:     usercalls = win81_usercall_nums;      break;
+    case DR_WINDOWS_VERSION_8:       usercalls = win8_usercall_nums;       break;
+    case DR_WINDOWS_VERSION_7:       usercalls = win7_usercall_nums;       break;
     case DR_WINDOWS_VERSION_VISTA: {
         if (ver->service_pack_major >= 2)
             usercalls = winvistaSP2_usercall_nums;
@@ -1524,7 +1553,11 @@ handle_UserMessageCall(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *i
     BOOL ansi = (BOOL) pt->sysarg[6];
     bool result_written = true;
 
-    /* First, handle result param: whether read or written */
+    /* First, handle result param: whether read or written.
+     * XXX i#1752: the return value of the syscall is actually the LRESULT, so
+     * it's not clear whether this param #4 is really used as an OUT param.
+     * It's NULL in all instances of the syscall observed so far.
+     */
     if (type == FNID_SENDMESSAGECALLBACK ||
         type == FNID_SENDMESSAGEFF ||
         type == FNID_SENDMESSAGEWTOOPTION)
@@ -1639,6 +1672,64 @@ handle_UserMessageCall(void *drcontext, cls_syscall_t *pt, sysarg_iter_info_t *i
                                 (byte *) lparam, sizeof(WINDOWPOS),
                                 "WM_WINDOWPOSCHANGING", DRSYS_TYPE_STRUCT, "WINDOWPOS"))
             return;
+        break;
+    }
+
+    /* Edit control messages:
+     *
+     * For now we only have handling for writes by the kernel for EM_GET*.
+     * FIXME i#1752: add checking of reads, and go through the rest of the EM_*
+     * types and find other writes.
+     * XXX i#1752: add tests for these.
+     */
+    case EM_GETSEL: {
+        if (!report_memarg_type(ii, ORD_LPARAM, SYSARG_WRITE,
+                                (byte *) lparam, sizeof(DWORD),
+                                "EM_GETSEL", DRSYS_TYPE_UNSIGNED_INT, NULL))
+            return;
+        if (!report_memarg_type(ii, ORD_WPARAM, SYSARG_WRITE,
+                                (byte *) wparam, sizeof(DWORD),
+                                "EM_GETSEL", DRSYS_TYPE_UNSIGNED_INT, NULL))
+            return;
+        break;
+    }
+    case EM_GETRECT: {
+        if (!report_memarg_type(ii, ORD_LPARAM, SYSARG_WRITE,
+                                (byte *) lparam, sizeof(RECT),
+                                "EM_GETRECT", DRSYS_TYPE_STRUCT, "RECT"))
+            return;
+        break;
+    }
+    case EM_GETLINE: {
+        /* 1st WORD in buf holds # chars */
+        WORD chars;
+        if (safe_read((WORD *) lparam, sizeof(chars), &chars)) {
+            if (ansi) {
+                handle_cstring(ii, ORD_LPARAM, SYSARG_WRITE, "EM_GETLINE buffer",
+                               (byte *) lparam, chars*sizeof(char), NULL, true);
+            } else {
+                handle_cwstring(ii, "EM_GETLINE buffer", (byte *) lparam,
+                                chars*sizeof(wchar_t), ORD_LPARAM, SYSARG_WRITE,
+                                NULL, true);
+            }
+            if (ii->abort)
+                return;
+        }
+        break;
+    }
+    case EM_GETCUEBANNER: {
+        handle_cwstring(ii, "EM_GETCUEBANNER buffer", (byte *) wparam,
+                        lparam*sizeof(wchar_t), ORD_WPARAM, SYSARG_WRITE,
+                        NULL, true);
+        if (ii->abort)
+            return;
+        break;
+    }
+
+    default: {
+        DO_ONCE({ WARN("WARNING: unhandled NtUserMessageCall types found\n"); });
+        LOG(SYSCALL_VERBOSE, "WARNING: unhandled NtUserMessageCall message type 0x%x\n",
+            msg);
         break;
     }
     }

@@ -34,6 +34,8 @@ Error #5: INVALID HEAP ARGUMENT
 %if WINDOWS_PRE_8
 malloc.c:203
 %endif
-%if WINDOWS_8
+%if WINDOWS_8_PLUS
 malloc.c:205
 %endif
+: UNADDRESSABLE ACCESS: reading 1 byte(s)
+malloc.c:288

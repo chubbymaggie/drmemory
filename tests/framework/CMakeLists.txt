@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2012-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2012-2016 Google, Inc.  All rights reserved.
 # **********************************************************
 
 # Dr. Memory: the memory debugger
@@ -18,7 +18,11 @@
 # License along with this library; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+# XXX i#1652: make this a separate project and use --build-and-test
+
 cmake_minimum_required(VERSION 2.6)
+
+include(${PROJECT_SOURCE_DIR}/make/policies.cmake NO_POLICY_SCOPE)
 
 # Always build Debug
 set(CMAKE_BUILD_TYPE "Debug")
@@ -42,17 +46,33 @@ find_package(DrMemoryFramework PATHS ${framework_dir})
 # a function scope, we must set the global vars ahead of time:
 configure_DynamoRIO_global(OFF ON)
 
+# We save pdb+dll space by not using libc (xref DRi#714).
+# For Android, we allow running w/o a private Bionic.
+# For Linux x86 we need libc for div+mod routines.
+if (WIN32 OR ARM OR ANDROID)
+  set(DynamoRIO_USE_LIBC OFF)
+endif ()
+
+function(add_drmf_test_app app_name src_app)
+  add_executable(${app_name} ${src_app})
+  set_property(TARGET ${app_name} PROPERTY COMPILE_DEFINITIONS ${arch_defs})
+  if (UNIX AND NOT X64 AND NOT ARM)
+    append_property_string(TARGET ${app_name} COMPILE_FLAGS "-m32")
+    append_property_string(TARGET ${app_name} LINK_FLAGS "-m32")
+  endif ()
+  if (UNIX)
+    append_property_string(TARGET ${app_name} COMPILE_FLAGS "-g")
+  else (UNIX)
+    # i#1748: disable inlining optimization to avoid calls to
+    # fuzzing targets being inlined
+    append_property_string(TARGET ${app_name} COMPILE_FLAGS "/Zi /Ob0")
+  endif (UNIX)
+endfunction(add_drmf_test_app)
+
 # We only expect a few tests, so we simplify things by having a simple
 # regex output for whether they passed.
 # ext_list should be a list of extensions minus the drmf_ prefix.
-function(add_drmf_test test_name src_app src_client ext_list pass_regex)
-  add_executable(${test_name} ${src_app})
-  set_property(TARGET ${test_name} PROPERTY COMPILE_DEFINITIONS ${arch_defs})
-  if (UNIX AND NOT X64)
-    append_property_string(TARGET ${test_name} COMPILE_FLAGS "-m32")
-    append_property_string(TARGET ${test_name} LINK_FLAGS "-m32")
-  endif ()
-
+function(add_drmf_test test_name app_name src_client ext_list client_options pass_regex)
   set(client_name ${test_name}.client)
   add_library(${client_name} SHARED ${src_client})
   set_property(TARGET ${client_name} PROPERTY COMPILE_DEFINITIONS ${arch_defs})
@@ -61,7 +81,12 @@ function(add_drmf_test test_name src_app src_client ext_list pass_regex)
   configure_DynamoRIO_client(${client_name})
 
   foreach (ext ${ext_list})
-    use_DynamoRIO_extension(${client_name} drmf_${ext}) # drmf_ prefix b/c internal
+    if ("${CMAKE_VERSION}" VERSION_EQUAL "3.0" OR
+        "${CMAKE_VERSION}" VERSION_GREATER "3.0")
+      use_DynamoRIO_extension(${client_name} ${ext})
+    else ()
+      use_DynamoRIO_extension(${client_name} drmf_${ext}) # drmf_ prefix b/c internal
+    endif ()
     use_DynamoRIO_extension(${client_name} drmgr)
     # We use the namespace prefix to allow us to avoid target conflicts
     # (else we'd need a completely separate build for these tests),
@@ -69,23 +94,54 @@ function(add_drmf_test test_name src_app src_client ext_list pass_regex)
     add_dependencies(${client_name} ${ext})
   endforeach (ext)
 
-  get_target_property(app_path ${test_name} LOCATION${location_suffix})
+  get_target_property(app_path ${app_name} LOCATION${location_suffix})
   get_target_property(client_path ${client_name} LOCATION${location_suffix})
   if (DEBUG_BUILD)
-    set(drrun_extra -debug)
+    set(drrun_extra -quiet -debug)
   else ()
-    set(drrun_extra "")
+    set(drrun_extra -quiet)
   endif ()
   add_test(${test_name}
     ${DynamoRIO_DIR}/../${BIN_ARCH}/drrun ${drrun_extra}
-    -client ${client_path} 0 ""
-    -msgbox_mask 0
+    -client ${client_path} 0 "${client_options}"
+    -msgbox_mask 0 -stderr_mask 0xc
     "--" ${app_path})
   set_tests_properties(${test_name} PROPERTIES PASS_REGULAR_EXPRESSION "${pass_regex}")
 endfunction(add_drmf_test)
 
-add_drmf_test(drsyscall_test drsyscall_app.c drsyscall_client.c
-  drsyscall "TEST PASSED")
+add_drmf_test_app(drsyscall_app drsyscall_app.c)
+add_drmf_test(drsyscall_test drsyscall_app drsyscall_client.c
+  drsyscall "" "done\nTEST PASSED")
+add_drmf_test(strace_test drsyscall_app strace_client.c
+  drsyscall "" "done\n.*TEST PASSED")
 
-add_drmf_test(strace_test drsyscall_app.c strace_client.c
-  drsyscall "TEST PASSED")
+# drfuzz tests
+add_drmf_test_app(drfuzz_app_empty drfuzz_app_empty.c)
+add_drmf_test(drfuzz_test_empty drfuzz_app_empty drfuzz_client_empty.c
+  drfuzz "" "done\nTEST PASSED")
+add_drmf_test(drfuzz_test_mutator drfuzz_app_empty drfuzz_client_mutator.c
+  drfuzz "" "TEST PASSED\n.*done")
+
+add_drmf_test_app(drfuzz_app_repeat drfuzz_app_repeat.c)
+add_drmf_test(drfuzz_test_repeat drfuzz_app_repeat drfuzz_client_repeat.c
+  drfuzz "" "hello 1\nhello 2\nhello 3\nhello 4\nhello 5\ndone\nTEST PASSED")
+
+add_drmf_test_app(drfuzz_app_segfault drfuzz_app_segfault.c)
+
+set(segfault_regex_1 "Fault occured in target.*with 1 args.*")
+set(segfault_regex_2 "Crash originated in target.*with 1 args.*")
+set(segfault_regex_3 "TEST PASSED")
+
+add_drmf_test(drfuzz_test_segfault drfuzz_app_segfault drfuzz_client_segfault.c
+  drfuzz "-crash" "${segfault_regex_1}${segfault_regex_2}${segfault_regex_3}")
+use_DynamoRIO_extension(drfuzz_test_segfault.client drsyms)
+
+add_drmf_test(drfuzz_test_app_abort drfuzz_app_segfault drfuzz_client_segfault.c
+  drfuzz "-abort" "${segfault_regex_2}${segfault_regex_3}")
+use_DynamoRIO_extension(drfuzz_test_app_abort.client drsyms)
+
+add_drmf_test(drfuzz_test_no_crash drfuzz_app_segfault drfuzz_client_segfault.c
+  drfuzz "" ".*TEST PASSED")
+use_DynamoRIO_extension(drfuzz_test_no_crash.client drsyms)
+
+# XXX i#1734: add multi-threaded test, checking for aborted fuzz targets on all threads

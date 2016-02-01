@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+# Copyright (c) 2011-2015 Google, Inc.  All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
 # **********************************************************
 #
@@ -748,6 +748,13 @@ MSVCP*.dll!*
 ...
 MSVCR*.dll!exit
 
+# Variant seen in i#1831
+INVALID HEAP ARGUMENT
+name=default i#960 CRT mismatch C
+MSVCP*.dll!*
+...
+MSVCR*.dll!initterm_e
+
 ##################################################
 # i#1240: real mismatches in VS2010 CRT
 # We can rely on symbols here as without them we wouldn't see the operator stubs.
@@ -872,7 +879,6 @@ UxTheme.dll!GetThemeBackgroundContentRect
 UNINITIALIZED READ
 name=default i#1324 mingw runtime
 *!__mingw_glob
-*!__mingw_CRTStartup
 
 ##################################################
 # i#599: known reachable allocs in MSCRT
@@ -996,3 +1002,52 @@ system call NtGdiDeleteObjectApp
 GDI32.dll!DeleteDC
 GDI32.dll!DeleteDC
 SHELL32.dll!Ordinal*
+
+##################################################
+# i#1669: win10-specific process creation error
+# XXX: the 2nd param here is not PUNICODE_STRING: we
+# should update the database.
+
+UNADDRESSABLE ACCESS
+name=default i#1669 win10 create process
+system call NtApphelpCacheControl UNICODE_STRING content
+...
+KERNELBASE.dll!CreateProcessInternalW
+
+##################################################
+# i#1769: Norton injected code errors
+
+UNINITIALIZED READ
+name=default i#1769 Norton UMEngx86
+...
+UMEngx86.dll!*
+
+UNADDRESSABLE ACCESS
+name=default i#1769 Norton beyond-TOS A
+instruction=*0xfffff???(%esp)*
+<not in a module>
+kernel*.dll!*
+
+UNADDRESSABLE ACCESS
+name=default i#1769 Norton beyond-TOS B
+instruction=*0xfffff???(%esp)*
+<not in a module>
+ntdll.dll!*
+
+UNINITIALIZED READ
+name=default i#1769 Norton thread A
+<not in a module>
+kernel32.dll!BaseThreadInitThunk
+
+UNINITIALIZED READ
+name=default i#1769 Norton thread B
+system call NtQueryInformationThread parameter value #2
+kernel32.dll!BaseThreadInitThunk
+
+##################################################
+# i#1783: F-Secure injected code errors
+
+UNINITIALIZED READ
+name=default i#1783 F-Secure
+...
+fshook32.dll!*

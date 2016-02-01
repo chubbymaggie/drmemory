@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -26,7 +26,7 @@
 #include "utils.h"
 #include "syscall.h"
 #include "shadow.h"
-#include "readwrite.h"
+#include "slowpath.h"
 #include "syscall_os.h"
 #include "alloc.h"
 #include "perturb.h"
@@ -504,7 +504,7 @@ event_pre_syscall(void *drcontext, int sysnum)
      * shadow handling for proper NtContinue handling and proper
      * NtCallbackReturn handling
      */
-    handle_pre_alloc_syscall(drcontext, sysnum, mc);
+    res = handle_pre_alloc_syscall(drcontext, sysnum, mc) && res;
 
     if (options.perturb)
         res = perturb_pre_syscall(drcontext, sysnum) && res;
@@ -547,7 +547,7 @@ event_post_syscall(void *drcontext, int sysnum)
 
     if (options.shadowing) {
         /* post-syscall, eax is defined */
-        register_shadow_set_dword(REG_XAX, SHADOW_DWORD_DEFINED);
+        register_shadow_set_dword(DR_REG_PTR_RETURN, SHADOW_DWORD_DEFINED);
         if (success) {
             /* commit the writes via MEMREF_WRITE */
             if (drsys_iterate_memargs(drcontext, drsys_iter_memarg_cb, NULL) !=

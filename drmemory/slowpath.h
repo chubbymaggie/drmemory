@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -21,17 +21,23 @@
  */
 
 /***************************************************************************
- * readwrite.h: Dr. Memory read/write instrumentation
+ * slowpath.h: Dr. Memory read/write slowpath instrumentation
  */
 
-#ifndef _READWRITE_H_
-#define _READWRITE_H_ 1
+#ifndef _SLOWPATH_H_
+#define _SLOWPATH_H_ 1
 
 #include "fastpath.h"
 #include "callstack.h" /* for app_loc_t */
 
 /* there is no REG_EFLAGS so we use the REG_INVALID sentinel */
 #define REG_EFLAGS REG_INVALID
+
+#ifdef X86
+# define REG_FRAME_PTR DR_REG_XBP
+#elif defined(ARM)
+# define REG_FRAME_PTR DR_REG_FP
+#endif
 
 /* we only need a little over 2 pages for whole_bb_spills_enabled(): could get
  * onto 2 pages by not emitting SPILL_REG_NONE.
@@ -45,16 +51,10 @@
 #endif
 
 void
-instrument_init(void);
+gencode_init(void);
 
 void
-instrument_exit(void);
-
-void
-instrument_thread_init(void *drcontext);
-
-void
-instrument_thread_exit(void *drcontext);
+gencode_exit(void);
 
 byte *
 generate_shared_slowpath(void *drcontext, instrlist_t *ilist, byte *pc);
@@ -156,14 +156,18 @@ extern uint delayed_free_bytes;
 extern uint app_instrs_fastpath;
 extern uint app_instrs_no_dup;
 extern uint xl8_app_for_slowpath;
+extern uint num_bbs;
+
+# ifdef X86
 extern uint movs4_src_unaligned;
 extern uint movs4_dst_unaligned;
 extern uint movs4_src_undef;
 extern uint movs4_med_fast;
 extern uint cmps1_src_undef;
 extern uint cmps1_med_fast;
-extern uint num_bbs;
-#endif
+# endif
+
+#endif /* STATISTICS */
 
 extern hashtable_t bb_table;
 
@@ -172,12 +176,6 @@ extern hashtable_t xl8_sharing_table;
 
 /* alloca handling in fastpath (i#91) */
 extern hashtable_t ignore_unaddr_table;
-
-#ifdef DEBUG
-/* use seg_tls for actual code */
-# define EXPECTED_SEG_TLS IF_X64_ELSE(SEG_GS, SEG_FS)
-#endif
-extern reg_id_t seg_tls;
 
 bool
 opnd_uses_nonignorable_memory(opnd_t opnd);
@@ -188,6 +186,9 @@ check_mem_opnd_nouninit(uint opc, uint flags, app_loc_t *loc, opnd_t opnd, uint 
 
 bool
 handle_mem_ref(uint flags, app_loc_t *loc, app_pc addr, size_t sz, dr_mcontext_t *mc);
+
+bool
+should_mark_stack_frames_defined(app_pc pc);
 
 bool
 check_register_defined(void *drcontext, reg_id_t reg, app_loc_t *loc, size_t sz,
@@ -211,95 +212,40 @@ instrument_slowpath(void *drcontext, instrlist_t *bb, instr_t *inst, fastpath_in
 bool
 slow_path_with_mc(void *drcontext, app_pc pc, app_pc decode_pc, dr_mcontext_t *mc);
 
-size_t
-instrument_persist_ro_size(void *drcontext, void *perscxt);
-
-bool
-instrument_persist_ro(void *drcontext, void *perscxt, file_t fd);
-
-bool
-instrument_resurrect_ro(void *drcontext, void *perscxt, byte **map INOUT);
+void
+slowpath_module_load(void *drcontext, const module_data_t *mod, bool loaded);
 
 void
-bb_save_add_entry(app_pc key, bb_saved_info_t *save);
-
-void
-readwrite_module_load(void *drcontext, const module_data_t *mod, bool loaded);
-
-void
-readwrite_module_unload(void *drcontext, const module_data_t *mod);
-
-/***************************************************************************
- * REGISTER SPILLING
- */
-
-/* eflags eax and up-front save use this slot, and whole-bb spilling stores
- * eflags itself (lahf+seto) here
- */
-#define SPILL_SLOT_EFLAGS_EAX SPILL_SLOT_3
-
-int
-spill_reg3_slot(bool eflags_dead, bool eax_dead, bool r1_dead, bool r2_dead);
-
-void
-spill_reg(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t reg,
-          dr_spill_slot_t slot);
-
-void
-restore_reg(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t reg,
-            dr_spill_slot_t slot);
-
-opnd_t
-spill_slot_opnd(void *drcontext, dr_spill_slot_t slot);
-
-bool
-is_spill_slot_opnd(void *drcontext, opnd_t op);
-
-byte *
-get_own_seg_base(void);
-
-uint
-num_own_spill_slots(void);
-
-opnd_t
-opnd_create_own_spill_slot(uint index);
-
-ptr_uint_t
-get_own_tls_value(uint index);
-
-void
-set_own_tls_value(uint index, ptr_uint_t val);
-
-ptr_uint_t
-get_thread_tls_value(void *drcontext, uint index);
-
-void
-set_thread_tls_value(void *drcontext, uint index, ptr_uint_t val);
-
-ptr_uint_t
-get_raw_tls_value(uint offset);
+slowpath_module_unload(void *drcontext, const module_data_t *mod);
 
 /***************************************************************************
  * ISA UTILITY ROUTINES
  */
 
-#define REP_PREFIX    0xf3
-#define REPNE_PREFIX  0xf2
-#define MOVS_4_OPCODE 0xa5
-#define CMPS_1_OPCODE 0xa6
-#define LOOP_INSTR_OPCODE 0xe2
-#define LOOP_INSTR_LENGTH 2
-#define JNZ_SHORT_OPCODE    0x75
-#define JNZ_SHORT_LENGTH    2
-#define UD2A_LENGTH         2
-#define CMP_OPCODE       0x80
-#define CMP_BASE_IMM1_LENGTH  3
-#define UD2A_OPCODE      0x0b0f
+#ifdef X86
+# define REP_PREFIX    0xf3
+# define REPNE_PREFIX  0xf2
+# define MOVS_4_OPCODE 0xa5
+# define CMPS_1_OPCODE 0xa6
+# define LOOP_INSTR_OPCODE 0xe2
+# define LOOP_INSTR_LENGTH 2
+# define JNZ_SHORT_OPCODE    0x75
+# define JNZ_SHORT_LENGTH    2
+# define UD2A_LENGTH         2
+# define CMP_OPCODE       0x80
+# define CMP_BASE_IMM1_LENGTH  3
+# define UD2A_OPCODE      0x0b0f
 /* N.B.: other opcodes like ADD also use 0x81, and CMP with immed opnd may use
  * other opcode value too.
  */
-#define CMP_IMMED_OPCODE 0x81
-#define RET_NOIMM_OPCODE 0xc3
+# define CMP_IMMED_OPCODE 0x81
+# define RET_NOIMM_OPCODE 0xc3
+#elif defined(ARM)
+# define UDF_THUMB_OPCODE 0xde00
+# define UDF_THUMB_LENGTH 2
+# define UDF_ARM_OPCODE 0xe7f000f0
+# define UDF_ARM_LENGTH 4
+#endif
 
 /* Avoid selfmod mangling for our "meta-instructions that can fault" (xref PR 472190).
  * Things would work without this (just lower performance, but on selfmod only)
@@ -339,7 +285,7 @@ bool
 opc_is_gpr_shift(uint opc);
 
 bool
-opc_is_jcc(uint opc);
+instr_is_jcc(instr_t *inst);
 
 bool
 opc_is_cmovcc(uint opc);
@@ -387,4 +333,4 @@ num_true_srcs(instr_t *inst, dr_mcontext_t *mc);
 int
 num_true_dsts(instr_t *inst, dr_mcontext_t *mc);
 
-#endif /* _READWRITE_H_ */
+#endif /* _SLOWPATH_H_ */

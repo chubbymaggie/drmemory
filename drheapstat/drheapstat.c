@@ -38,7 +38,8 @@
 #include "../drmemory/leak.h"
 #include "../drmemory/stack.h"
 #include "../drmemory/shadow.h"
-#include "../drmemory/readwrite.h"
+#include "../drmemory/instru.h"
+#include "../drmemory/slowpath.h"
 #ifdef MACOS
 # error NYI i#1438
 #elif defined(LINUX)
@@ -1953,8 +1954,8 @@ event_post_syscall(void *drcontext, int sysnum)
     handle_post_alloc_syscall(drcontext, sysnum, mc);
 }
 
-static void
-check_for_leaks(bool at_exit)
+void
+check_reachability(bool at_exit)
 {
     if (options.check_leaks) {
         void *drcontext = dr_get_current_drcontext();
@@ -2031,7 +2032,7 @@ event_nudge(void *drcontext, uint64 argument)
     dr_fprintf(f_nudge, "%d,%"INT64_FORMAT"u,%"INT64_FORMAT"u\n",
                nudge_count, snapshot_fpos, staleness_fpos);
     malloc_unlock();
-    check_for_leaks(false/*!at_exit*/);
+    check_reachability(false/*!at_exit*/);
     print_nudge_header(f_global);
     NOTIFY("Received nudge"NL, logsubdir);
 }
@@ -2131,7 +2132,7 @@ event_exit(void)
     }
     snapshot_exit();
     if (options.check_leaks) {
-        check_for_leaks(true/*at_exit*/);
+        check_reachability(true/*at_exit*/);
         leak_exit();
     }
 
