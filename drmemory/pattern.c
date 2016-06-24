@@ -25,6 +25,7 @@
 
 #include "dr_api.h"
 #include "drreg.h"
+#include "drutil.h"
 #include "drmemory.h"
 #include "slowpath.h"
 #include "spill.h"
@@ -202,6 +203,18 @@ pattern_insert_cmp_jne_ud2a(void *drcontext, instrlist_t *ilist, instr_t *app,
         in = INSTR_CREATE_ldrb(drcontext, opnd_create_reg(scratch), ref);
     } else if (opnd_get_size(ref) == OPSZ_2) {
         in = INSTR_CREATE_ldrh(drcontext, opnd_create_reg(scratch), ref);
+        if (!instr_is_encoding_possible(in)) {
+            /* i#1879: the ISA is not symmetric and there is not a 2-byte
+             * equivalent for every 1-byte load or store.
+             */
+            IF_DEBUG(bool ok = )
+                drutil_insert_get_mem_addr(drcontext, ilist, app, ref, scratch,
+                                           scratch2);
+            ASSERT(ok, "failed to handle unusual sub-word memref");
+            instr_destroy(drcontext, in);
+            in = INSTR_CREATE_ldrh(drcontext, opnd_create_reg(scratch),
+                                   OPND_CREATE_MEM16(scratch, 0));
+        }
     } else {
         ASSERT(opnd_get_size(ref) == OPSZ_4, "unsupported ARM memref size");
         in = INSTR_CREATE_ldr(drcontext, opnd_create_reg(scratch), ref);
@@ -217,6 +230,10 @@ pattern_insert_cmp_jne_ud2a(void *drcontext, instrlist_t *ilist, instr_t *app,
         PREXL8M(ilist, app, INSTR_XL8(in, pc));
     }
     /* cmp scratch to scratch2 */
+    /* XXX: we should switch to OP_teq to avoid clobbering the V flag, but
+     * we'd need drreg to support granular flag reservations (DRi#1886) to
+     * avoid an aflags spill.  Xref DRi#1877.
+     */
     in = INSTR_CREATE_cmp(drcontext, opnd_create_reg(scratch),
                           opnd_create_reg(scratch2));
     PREXL8M(ilist, app, INSTR_XL8(in, pc));

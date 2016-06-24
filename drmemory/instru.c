@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -793,6 +793,27 @@ insert_zero_retaddr(void *drcontext, instrlist_t *bb, instr_t *inst, bb_info_t *
             LOG(2, "zero retaddr in SEH_epilog\n");
         }
 # endif /* WINDOWS */
+# ifdef ARM
+    } else if (instr_get_opcode(inst) == OP_ldr &&
+               opnd_get_base(instr_get_src(inst, 0)) == DR_REG_SP &&
+               opnd_get_reg(instr_get_dst(inst, 0)) == DR_REG_LR) {
+        /* We handle this idiom here which thwarts the other retaddr clobbering code
+         * as the pop is prior to the indirect branch (i#1856):
+         *
+         *      f85d eb04  ldr    (%sp)[4byte] $0x00000004 %sp -> %lr %sp
+         *      b003       add    %sp $0x0000000c -> %sp
+         *      4770       bx     %lr
+         */
+        bool writeback = instr_num_srcs(inst) > 1;
+        if (writeback && opnd_is_immed_int(instr_get_src(inst, 1))) {
+            opnd_t memop = instr_get_src(inst, 0);
+            opnd_set_disp(&memop, -opnd_get_immed_int(instr_get_src(inst, 1)));
+            /* See above: we just write our stolen reg value */
+            /* XXX: is this against drmgr rules? */
+            POST(bb, inst, XINST_CREATE_store
+                 (drcontext, memop, opnd_create_reg(dr_get_stolen_reg())));
+        }
+#endif
     }
 }
 
@@ -1083,6 +1104,7 @@ instru_event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *ins
     app_pc pc = instr_get_app_pc(inst);
     uint opc;
     bool has_shadowed_reg, has_mem, has_noignorable_mem;
+    bool used_fastpath = false;
     fastpath_info_t mi;
 
     if (go_native)
@@ -1241,9 +1263,10 @@ instru_event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *ins
             pattern_instrument_check(drcontext, bb, inst, bi, translating);
         }
     } else if (options.shadowing &&
-        (options.check_uninitialized || has_noignorable_mem)) {
+               (options.check_uninitialized || has_noignorable_mem)) {
         if (instr_ok_for_instrument_fastpath(inst, &mi, bi)) {
             instrument_fastpath(drcontext, bb, inst, &mi, bi->check_ignore_unaddr);
+            used_fastpath = true;
             bi->added_instru = true;
         } else {
             LOG(3, "fastpath unavailable "PFX": ", pc);
@@ -1358,6 +1381,12 @@ instru_event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *ins
  instru_event_bb_insert_done:
     if (bi->first_instr && instr_is_app(inst))
         bi->first_instr = false;
+    if (!used_fastpath && options.shadowing) {
+        /* i#1870: sanity check in case we bail out of instrumenting the next instr
+         * when we're sharing.
+         */
+        bi->shared_memop = opnd_create_null();
+    }
     /* We store whether bi->check_ignore_unaddr in our own data struct to avoid
      * DR having to store translations, so we can recreate deterministically
      * => DR_EMIT_DEFAULT

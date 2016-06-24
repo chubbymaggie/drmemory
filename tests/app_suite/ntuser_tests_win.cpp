@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /* Dr. Memory: the memory debugger
@@ -92,8 +92,8 @@ void ReadAsciiStringFromClipboard(std::string *result) {
     ::CloseClipboard();
 }
 
-// FIXME i#734: Re-enable when no uninits.
 TEST(NtUserTests, ClipboardPutGet) {
+    // FIXME i#734: Re-enable when no uninits.
     if (GetWindowsVersion() >= WIN_VISTA) {
         printf("WARNING: Disabling ClipboardPutGet on Win Vista+, see i#734.\n");
         return;
@@ -104,6 +104,16 @@ TEST(NtUserTests, ClipboardPutGet) {
     WriteStringToClipboard(str);
     ReadAsciiStringFromClipboard(&tmp);
     ASSERT_STREQ("ASCII", tmp.c_str());
+}
+
+TEST(NtUserTests, ClipboardFormat) {
+    /* i#1824: test NtUserGetClipboardFormatName */
+    WCHAR buf[257];
+    int ret = GetClipboardFormatNameW(49283, buf, 256);
+    EXPECT_GT(ret, 0);
+    for (int i = 0; i < ret; ++i)
+        EXPECT_NE(buf[i], '\0');
+    EXPECT_EQ(buf[ret], '\0');
 }
 
 } /* Clipboard_Tests */
@@ -378,4 +388,12 @@ TEST(NtUserTests, BuildPropList) {
     }
     PropVariantClear(&prop);
     pps->Release();
+}
+
+TEST(NtUserTests, GetKeyNameTextW) {
+    /* i#1819: ensure null char is marked init */
+    WCHAR buf[MAX_PATH];
+    int ret = GetKeyNameTextW(35454976/*CTRL*/, buf, MAX_PATH);
+    EXPECT_NE(ret, 0);
+    EXPECT_EQ(buf[ret], '\0');
 }

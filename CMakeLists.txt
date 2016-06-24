@@ -78,6 +78,23 @@ endif (APPLE)
 if (CMAKE_SYSTEM_NAME MATCHES "^Android")
   set(ANDROID 1)
   set(DEFINES ${DEFINES} -DANDROID)
+  set(DRM_DEVICE_BASEDIR "/data/local/tmp" CACHE STRING "base dir for Android binaries")
+  option(DRM_COPY_TO_DEVICE "copy cross-compiled binaries to DRM_DEVICE_BASEDIR" OFF)
+  if (DRM_COPY_TO_DEVICE)
+    find_program(ADB adb DOC "adb Android utility")
+    if (NOT ADB)
+      message(FATAL_ERROR "Unable to find adb for DRM_COPY_TO_DEVICE")
+    else ()
+      execute_process(COMMAND ${ADB} get-state
+        RESULT_VARIABLE adb_result
+        ERROR_VARIABLE adb_err
+        OUTPUT_VARIABLE adb_out OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if (adb_result OR NOT adb_out STREQUAL "device")
+        message(FATAL_ERROR "Android device not connected for DRM_COPY_TO_DEVICE")
+      endif ()
+      message(STATUS "Binaries will be copied to the attached Android device")
+    endif ()
+  endif ()
 endif ()
 
 # The target arch:
@@ -143,7 +160,7 @@ endif (TOOL_DR_HEAPSTAT)
 # release version as the patchlevel ver# to distinguish
 # We used to use the svn revision (i#83) and we leave that code in place
 # (for now at least) for anyone building an old checkout.
-# For git, we follow i#1565 and use a date.
+# For git, we follow DRi#1565 and use a date.
 set(VERSION_NUMBER_PATCHLEVEL 0)
 if (EXISTS "${PROJECT_SOURCE_DIR}/.svn")
   find_program(SVN svn DOC "subversion client")
@@ -167,22 +184,41 @@ else (EXISTS "${PROJECT_SOURCE_DIR}/.svn")
       # We want the committer date (not author date) (xref DRi#1565).  We request
       # UNIX timestamp format and then divide down to days to get a small enough
       # number for the Windows resource limits.
-      #
-      # XXX DRi#1565: to support building when not in a git repo (e.g., from a source
-      # tarball) we should add support for a local file holding the version.
       execute_process(COMMAND ${GIT} log -n 1 --format=%ct
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         RESULT_VARIABLE git_result
         ERROR_VARIABLE git_err
         OUTPUT_VARIABLE git_out)
       if (git_result OR git_err)
-        message(FATAL_ERROR "*** ${GIT} log failed: ***\n${git_err}")
+        message("*** ${GIT} log failed: ***\n${git_err}")
+      else (git_result OR git_err)
+        math(EXPR daycount "${git_out} / (60*60*24)")
       endif (git_result OR git_err)
-      math(EXPR daycount "${git_out} / (60*60*24)")
-      if (daycount)
-        set(VERSION_NUMBER_PATCHLEVEL "${daycount}")
-      endif ()
     endif (GIT)
+    if (NOT daycount)
+      # XXX DRi#1565: to support building when not in a git repo (e.g., from a source
+      # tarball) we use date to get current time for timestamp.
+      # This is not ideal as it confuses the build timestamp with the commit
+      # timestamp.  We should add support for a local file holding the version.
+      find_program(DATE date DOC "system date")
+      if (DATE)
+        execute_process(COMMAND ${DATE} +%s
+          RESULT_VARIABLE date_result
+          ERROR_VARIABLE date_err
+          OUTPUT_VARIABLE date_out)
+        if (date_result OR date_err)
+          message("*** ${DATE} failed: ***\n${date_err}")
+        else (date_result OR date_err)
+          math(EXPR daycount "${date_out} / (60*60*24)")
+        endif (date_result OR date_err)
+      endif (DATE)
+    endif (NOT daycount)
+    if (NOT daycount)
+      # set a much further date in the future to avoid confusing
+      # this fake date with the real date from git log
+      set(daycount 33333)
+    endif (NOT daycount)
+    set(VERSION_NUMBER_PATCHLEVEL "${daycount}")
   endif (EXISTS "${PROJECT_SOURCE_DIR}/.git")
 endif (EXISTS "${PROJECT_SOURCE_DIR}/.svn")
 
@@ -193,7 +229,7 @@ if (APPLE)
   math(EXPR VERSION_NUMBER_PATCHLEVEL "(${VERSION_NUMBER_PATCHLEVEL} % 200) + 56")
 endif (APPLE)
 
-set(VERSION_NUMBER_DEFAULT "1.9.${VERSION_NUMBER_PATCHLEVEL}")
+set(VERSION_NUMBER_DEFAULT "1.10.${VERSION_NUMBER_PATCHLEVEL}")
 # do not store the default TOOL_VERSION_NUMBER in the cache to prevent a stale one
 # from preventing future version updates in a pre-existing build dir.
 # avoid "VERSION_NUMBER" name since conflics w/ DR's var
@@ -771,7 +807,7 @@ else ()
 endif ()
 
 # when updating this, also update the git submodule
-set(DynamoRIO_VERSION_REQUIRED "6.0.16832")
+set(DynamoRIO_VERSION_REQUIRED "6.1.16923")
 
 set(DR_install_dir "dynamorio")
 
@@ -825,6 +861,12 @@ else (USER_SPECIFIED_DynamoRIO_DIR)
     set(DEBUG ON CACHE BOOL "DynamoRIO option: debug build")
     set(INTERNAL ON CACHE BOOL "DynamoRIO option: internal build")
   endif ("${CMAKE_BUILD_TYPE}" MATCHES "Debug")
+  if (DRM_COPY_TO_DEVICE)
+    set(DR_COPY_TO_DEVICE ON CACHE BOOL "DynamoRIO option: copy to Android")
+    get_filename_component(builddir ${PROJECT_BINARY_DIR} NAME)
+    set(DR_DEVICE_BASEDIR "${DRM_DEVICE_BASEDIR}/${builddir}" CACHE STRING
+      "DynamoRIO option: Android path")
+  endif ()
   # We do not want DR install, except for the targets we need for our
   # multi-export-set install of the DRMF.  We need those targets
   # even for BUILDING_SUB_PACKAGE.
@@ -981,6 +1023,68 @@ add_asm_target(common/${asm_file} asm_utils_src asm_utils_tgt ""
 
 ##################################################
 
+if (ANDROID)
+  # We cache this for us in sub-projects like framework/samples/
+  set(TOP_BINARY_DIR ${PROJECT_BINARY_DIR})
+  get_filename_component(builddir ${TOP_BINARY_DIR} NAME)
+  set(DRM_DEVICE_BINARY_DIR ${DRM_DEVICE_BASEDIR}/${builddir})
+endif ()
+
+function (copy_target_to_device target)
+  if (DRM_COPY_TO_DEVICE)
+    DynamoRIO_copy_target_to_device(${target} ${DRM_DEVICE_BASEDIR})
+  endif ()
+endfunction (copy_target_to_device)
+
+function (copy_file_to_device local_path)
+  if (DRM_COPY_TO_DEVICE)
+    file(RELATIVE_PATH relpath "${TOP_BINARY_DIR}" "${local_path}")
+    execute_process(
+      COMMAND ${ADB} push ${local_path} ${DRM_DEVICE_BINARY_DIR}/${relpath}
+      RESULT_VARIABLE adb_result ERROR_VARIABLE adb_err OUTPUT_QUIET)
+    if (adb_result)
+      message(FATAL_ERROR "*** Failed to adb push ${local_path}: ${adb_err} ***\n")
+    endif ()
+  endif ()
+endfunction (copy_file_to_device)
+
+function (get_target_path_for_execution out target)
+  if (ANDROID)
+    DynamoRIO_get_target_path_for_execution(local ${target} ${DRM_DEVICE_BASEDIR})
+  else ()
+    DynamoRIO_get_target_path_for_execution(local ${target} "")
+  endif ()
+  set(${out} ${local} PARENT_SCOPE)
+endfunction (get_target_path_for_execution)
+
+function (convert_local_path_to_device_path out local_path)
+  if (ANDROID)
+    file(RELATIVE_PATH relpath "${TOP_BINARY_DIR}" "${local_path}")
+    set(local ${DRM_DEVICE_BINARY_DIR}/${relpath})
+  else ()
+    set(local ${local_path})
+  endif ()
+  set(${out} ${local} PARENT_SCOPE)
+endfunction (convert_local_path_to_device_path)
+
+function (prefix_cmd_if_necessary cmd_out use_ats cmd_in)
+  DynamoRIO_prefix_cmd_if_necessary(local ${use_ats} ${cmd_in} ${ARGN})
+  set(${cmd_out} ${local} PARENT_SCOPE)
+endfunction (prefix_cmd_if_necessary)
+
+function (copy_and_adjust_drpaths basedir target)
+  if (ANDROID AND DRM_COPY_TO_DEVICE)
+    file(GLOB drpaths ${target}/*${target}*.drpath)
+    foreach(drpath ${drpaths}) # we only expect one though
+      file(READ ${drpath} contents)
+      string(REPLACE "${PROJECT_BINARY_DIR}" "${DRM_DEVICE_BINARY_DIR}"
+        contents ${contents})
+      file(WRITE ${drpath} ${contents})
+      copy_file_to_device(${drpath})
+    endforeach ()
+  endif ()
+endfunction ()
+
 if (WIN32)
   set(FLAG_DISABLE_FPO "/Oy-")
 else (WIN32)
@@ -1114,10 +1218,12 @@ if (USE_DRSYMS)
     set_target_properties(${toolname} PROPERTIES OUTPUT_NAME "${frontend_name}")
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/${tooldir}/launcher_android.sh"
       "${PROJECT_BINARY_DIR}/${BUILD_BIN}/${toolname}" @ONLY)
+    copy_file_to_device("${PROJECT_BINARY_DIR}/${BUILD_BIN}/${toolname}")
   endif ()
   if (WIN32)
     target_link_libraries(${toolname} dbghelp)
   endif (WIN32)
+  copy_target_to_device(${toolname})
 else (USE_DRSYMS)
   set(client_target ${toolname})
 endif (USE_DRSYMS)
@@ -1133,6 +1239,7 @@ if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
   # ensure race-free parallel builds
   add_dependencies(${client_target} ${asm_utils_tgt})
 endif ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
+copy_target_to_device(${client_target})
 
 # We require frames in our replacement routines in order to reliably include
 # the allocator routines in the callstack for i#639.  Xref i#958.
@@ -1166,7 +1273,12 @@ endif (WIN32)
 
 # we want a preferred base to avoid patching pcaches
 set(DynamoRIO_SET_PREFERRED_BASE ON)
-set(PREFERRED_BASE 0x73800000)
+if (ANDROID)
+  # i#1881: 0x73800000 seems to conflict w/ hardcoded Android mmaps.
+  set(PREFERRED_BASE 0x17000000)
+else ()
+  set(PREFERRED_BASE 0x73800000)
+endif ()
 
 # we can handle being tied to a particular DR version (we already are)
 set(DynamoRIO_FAST_IR ON)
@@ -1368,6 +1480,8 @@ endif (PERL_TO_EXE)
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/logs")
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/logs/codecache")
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/logs/dynamorio")
+file(WRITE "${PROJECT_BINARY_DIR}/logs/README" "Directory for logs") # for adb push
+copy_file_to_device("${PROJECT_BINARY_DIR}/logs")
 if (NOT PERL_TO_EXE AND NOT USE_DRSYMS)
   configure_file("${CMAKE_CURRENT_SOURCE_DIR}/${tooldir}/${toolname}.pl"
     "${PROJECT_BINARY_DIR}/${BUILD_BIN}/${toolname}.pl" @ONLY)
@@ -1497,6 +1611,7 @@ else (WIN32)
   file(READ "${defsupp_in}" txt)
   file(WRITE "${defsupp_out}" "${txt}")
 endif (WIN32)
+copy_file_to_device("${defsupp_out}")
 
 ###########################################################################
 # Tests
@@ -1531,6 +1646,9 @@ endif ()
 function (create_drrun_file frontend file_out name) # option list follows name
   get_target_property(frontend_path ${frontend} LOCATION${location_suffix})
   get_filename_component(frontend_name ${frontend_path} NAME)
+  if (ANDROID AND TOOL_DR_MEMORY)
+    set(frontend_name ${toolname}) # point at script, not launcher
+  endif ()
   if (BUILDING_SUB_PACKAGE)
     set(DRRUN_TOP "FRONTEND_REL=${INSTALL_PREFIX}/${BUILD_BIN}/${frontend_name}")
   else ()
@@ -1545,6 +1663,10 @@ function (create_drrun_file frontend file_out name) # option list follows name
   foreach (op ${ARGN})
     file(APPEND ${DRRUN_FILE} "TOOL_OP=${op}\n")
   endforeach ()
+  if (X64)
+    file(APPEND ${DRRUN_FILE}
+      "USER_NOTICE=Support for 64-bit applications under this tool is experimental.  Please report issues to http://drmemory.org/issues.\n")
+  endif ()
   install(FILES "${DRRUN_FILE}" DESTINATION "${DRRUN_INSTALL}/")
   set(${file_out} ${DRRUN_FILE} PARENT_SCOPE)
 
@@ -1554,18 +1676,12 @@ function (create_drrun_file frontend file_out name) # option list follows name
   endif ()
 endfunction (create_drrun_file)
 
+create_drrun_file(${toolname} unused "drmemory")
 if (NOT X64)
-  create_drrun_file(${toolname} unused "drmemory")
   create_drrun_file(${toolname} unused "drmemory_light" "-light")
 endif ()
 if (WIN32)
-  if (NOT X64) # XXX: today we aren't yet shipping 64-bit drmemory.exe
-    create_drrun_file(${toolname} leakfile "handle_leaks" "-handle_leaks_only")
-    if (X64)
-      file(APPEND ${leakfile}
-        "USER_NOTICE=Support for 64-bit applications under this tool is experimental.  Please report issues to http://drmemory.org/issues.\n")
-    endif ()
-  endif ()
+  create_drrun_file(${toolname} unused "handle_leaks" "-handle_leaks_only")
 endif ()
 
 ###########################################################################
@@ -1715,7 +1831,12 @@ if (BUILD_TOOL_TESTS)
     target_link_libraries(unit_tests drsymcache_int)
     target_link_libraries(unit_tests drfuzz_int)
     set(DynamoRIO_RPATH ${old_rpath})
-    add_test(unit_tests "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unit_tests")
+    get_target_path_for_execution(unit_relpath unit_tests)
+    prefix_cmd_if_necessary(unit_relpath OFF ${unit_relpath})
+    if (NOT ANDROID) # FIXME i#: not working on Android
+      add_test(unit_tests ${unit_relpath})
+    endif ()
+    copy_target_to_device(unit_tests)
   endif (TOOL_DR_MEMORY)
 
 endif (BUILD_TOOL_TESTS)
@@ -1898,6 +2019,9 @@ if (BUILDING_SUB_PACKAGE)
   # We're being included in another package (DR's).
   # Our rpaths assumed we had a dynamorio/ subdir, but now that's the upper dir.
   # Easier to add a symlink than to change rpaths.
+  # XXX i#1855: this symlink makes "adb push" of our tarball's contents not work,
+  # but presumably most users will untar on the Android device.
+  # Fixing would require changing the script and the frontend binary.
   install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink .. dynamorio WORKING_DIRECTORY \${CMAKE_INSTALL_PREFIX}/${INSTALL_PREFIX})")
 
   # Add a docs link in the top-level docs/ dir

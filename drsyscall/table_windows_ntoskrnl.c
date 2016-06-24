@@ -87,6 +87,7 @@ extern drsys_sysnum_t sysnum_CreateThread;
 extern drsys_sysnum_t sysnum_CreateThreadEx;
 extern drsys_sysnum_t sysnum_CreateUserProcess;
 extern drsys_sysnum_t sysnum_DeviceIoControlFile;
+extern drsys_sysnum_t sysnum_QueryInformationThread;
 extern drsys_sysnum_t sysnum_QuerySystemInformation;
 extern drsys_sysnum_t sysnum_QuerySystemInformationWow64;
 extern drsys_sysnum_t sysnum_QuerySystemInformationEx;
@@ -94,6 +95,8 @@ extern drsys_sysnum_t sysnum_SetSystemInformation;
 extern drsys_sysnum_t sysnum_SetInformationProcess;
 extern drsys_sysnum_t sysnum_PowerInformation;
 extern drsys_sysnum_t sysnum_QueryVirtualMemory;
+extern drsys_sysnum_t sysnum_FsControlFile;
+extern drsys_sysnum_t sysnum_TraceControl;
 
 
 /* The secondary tables are large, so we separate them into their own file: */
@@ -925,11 +928,11 @@ syscall_info_t syscall_ntdll_info[] = {
          {3, sizeof(PVOID), SYSARG_INLINED, DRSYS_TYPE_VOID},
          {4, sizeof(IO_STATUS_BLOCK), W|HT, DRSYS_TYPE_IO_STATUS_BLOCK},
          {5, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
-         {6, -7, R},
+         /* The "{6, -7, R}" param can have padding inside it and is special-cased */
          {7, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
          {8, -9, W},
          {9, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
-     }
+     }, &sysnum_FsControlFile
     },
     {{0,0},"NtGetContextThread", OK, RNTST, 2,
      {
@@ -1533,7 +1536,7 @@ syscall_info_t syscall_ntdll_info[] = {
          {2, -4, WI},
          {3, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
          {4, sizeof(ULONG), W|HT, DRSYS_TYPE_UNSIGNED_INT},
-     }
+     }, &sysnum_QueryInformationThread
     },
     {{0,0},"NtQueryInformationToken", OK|SYSINFO_RET_SMALL_WRITE_LAST, RNTST, 5,
      {
@@ -3278,13 +3281,13 @@ syscall_info_t syscall_ntdll_info[] = {
     {{0,0},"NtTraceControl", OK, RNTST, 6,
      {
          {0, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
-         {1, -2, R|HT, DRSYS_TYPE_STRUCT},
+         /* The "{1, -2, R|HT, DRSYS_TYPE_STRUCT}" entry is specially handled */
          {2, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
          {3, -4, W|HT, DRSYS_TYPE_STRUCT},
          {3, -5, WI|HT, DRSYS_TYPE_STRUCT},
          {4, sizeof(ULONG), SYSARG_INLINED, DRSYS_TYPE_UNSIGNED_INT},
          {5, sizeof(ULONG), W|HT, DRSYS_TYPE_UNSIGNED_INT},
-     }
+     }, &sysnum_TraceControl
     },
     {{0,WIN7},"NtWaitForWorkViaWorkerFactory", OK, RNTST, 2,
      {
